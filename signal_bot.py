@@ -1,7 +1,8 @@
 """
 Free automated signal bot (Forex + Deriv synthetic indices).
 Strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
-ATR-based stop loss, 1:2 risk/reward. Runs on a schedule via GitHub Actions,
+RR = 4.0               # take profit = 4 x risk (1:4)
+EXPIRE_HOURS = 240     # close a trade as "expired" after this long
 posts to a Telegram channel, and tracks TP/SL results per strategy in state/signals.json.
 """
 import json
