@@ -45,13 +45,15 @@ RR = 4.0               # take profit = 4 x risk (1:4)
 EXPIRE_HOURS = 240     # close a trade as "expired" after this long (10 days)
 
 # --- learning layer ---
-LEARNING = True        # False = post every signal, never pause anything
+LEARNING = True        # False = post every signal, never pause or remove anything
 WINDOW = 20            # judge each combination on its last 20 finished trades
 MIN_TRADES = 8         # need at least this many finished trades before judging
 PAUSE_BELOW_R = 0.0    # pause when the window total drops below this (in R)
 RESUME_AT_R = 1.0      # switch back on when the window total reaches this (in R)
 BACKTEST_MIN = 15      # a backtest needs this many trades before it can pause a combo
 BACKTEST_BARS = 5000   # candles to replay (about 7 months of forex H1)
+CUT_BELOW_R = -5.0     # REMOVE a combination if its backtest total is this bad (in R) ...
+CUT_MIN_TRADES = 10    # ... and the backtest had at least this many trades
 
 DERIV_URLS = [  # tried in order; the first one that answers is used
     "wss://api.derivws.com/trading/v1/options/ws/public",  # current public endpoint
@@ -406,6 +408,16 @@ def window_trades(state, key):
     return done[-WINDOW:]
 
 
+def cut_combos(backtest):
+    """Combinations the backtest showed to be clearly losing: removed completely."""
+    if not LEARNING:
+        return set()
+    return {
+        key for key, bt in backtest.items()
+        if bt["n"] >= CUT_MIN_TRADES and bt["r"] <= CUT_BELOW_R
+    }
+
+
 def combo_active(state, key, backtest):
     """Decide whether a strategy x instrument combination may post to the channel."""
     if not LEARNING:
@@ -426,7 +438,7 @@ def combo_active(state, key, backtest):
     return not paused
 
 
-def print_leaderboard(state, backtest):
+def print_leaderboard(state, backtest, cuts=frozenset()):
     keys = set(state["paused"]) | set(backtest)
     keys |= {combo_key(t["strategy"], t["pair"]) for t in state["open"] + state["closed"]}
     if not keys:
@@ -438,10 +450,10 @@ def print_leaderboard(state, backtest):
         r_recent = sum(t["r"] for t in recent)
         bt = backtest.get(key)
         bt_txt = f"bt {bt['n']}tr {bt['r']:+.1f}R" if bt else "bt -"
-        status = "PAUSED" if state["paused"].get(key) else "active"
+        status = "REMOVED" if key in cuts else ("PAUSED" if state["paused"].get(key) else "active")
         rows.append((key, status, f"{len(recent)}tr {r_recent:+.1f}R", bt_txt))
     for key, status, live_txt, bt_txt in rows:
-        print(f"{status:7s} {key:40s} recent {live_txt:14s} {bt_txt}")
+        print(f"{status:8s} {key:40s} recent {live_txt:14s} {bt_txt}")
     print("-------------------------------------------------")
 
 
@@ -536,12 +548,24 @@ def main():
 
     now = datetime.now(timezone.utc)
     weekend = now.weekday() >= 5
-    todo = [i for i in INSTRUMENTS if not (weekend and i["kind"] == "forex")]
-    if weekend:
-        print("Weekend: skipping forex, running synthetic indices only.")
 
     state = load_state()
     backtest = load_backtest()
+    cuts = cut_combos(backtest)
+    if cuts:
+        print(f"Removed by backtest ({len(cuts)}): " + ", ".join(sorted(cuts)))
+
+    # an instrument is skipped when every strategy on it was removed (unless a trade is still open)
+    still_open = {t["pair"] for t in state["open"]}
+    todo = []
+    for inst in INSTRUMENTS:
+        if weekend and inst["kind"] == "forex":
+            continue
+        wanted = any(combo_key(s, inst["name"]) not in cuts for s in STRATEGIES)
+        if wanted or inst["name"] in still_open:
+            todo.append(inst)
+    if weekend:
+        print("Weekend: skipping forex, running synthetic indices only.")
     candles = {}
     first_forex = True
     for inst in todo:
@@ -570,10 +594,12 @@ def main():
         if df is None:
             continue
         for strategy in STRATEGIES:
+            key = combo_key(strategy, inst["name"])
+            if key in cuts:
+                continue  # removed by the backtest
             if any(t["pair"] == inst["name"] and t["strategy"] == strategy for t in state["open"]):
                 continue  # one open trade per instrument per strategy
             sig = STRATEGY_FUNCS[strategy](inst, df)
-            key = combo_key(strategy, inst["name"])
             if sig and state["last_signal"].get(key) != sig["candle"]:
                 sig["live"] = combo_active(state, key, backtest)
                 if sig["live"]:
@@ -587,9 +613,11 @@ def main():
     # keep every combination's pause state fresh, even when it had no new signal
     for strategy in STRATEGIES:
         for inst in INSTRUMENTS:
-            combo_active(state, combo_key(strategy, inst["name"]), backtest)
+            key = combo_key(strategy, inst["name"])
+            if key not in cuts:
+                combo_active(state, key, backtest)
     save_state(state)
-    print_leaderboard(state, backtest)
+    print_leaderboard(state, backtest, cuts)
     print("Run complete.")
 
 
