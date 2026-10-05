@@ -1,5 +1,20 @@
 {
-  "open": [],
+  "open": [
+    {
+      "pair": "USD/JPY",
+      "strategy": "EMA Cross",
+      "side": "SELL",
+      "entry": 157.744,
+      "sl": 157.954,
+      "tp": 157.325,
+      "risk_pips": 21.0,
+      "unit": "pips",
+      "candle": "2026-10-04T23:00:00",
+      "opened_at": "2026-10-05T00:34:12.313626+00:00"
+    }
+  ],
   "closed": [],
-  "last_signal": {}
+  "last_signal": {
+    "EMA Cross|USD/JPY": "2026-10-04T23:00:00"
+  }
 }
