@@ -1,8 +1,7 @@
 """
 Free automated signal bot (Forex + Deriv synthetic indices).
 Strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
-RR = 4.0               # take profit = 4 x risk (1:4)
-EXPIRE_HOURS = 240     # close a trade as "expired" after this long
+ATR-based stop loss, 1:4 risk/reward. Runs on a schedule via GitHub Actions,
 posts to a Telegram channel, and tracks TP/SL results per strategy in state/signals.json.
 """
 import json
@@ -37,9 +36,12 @@ FAST_EMA, SLOW_EMA = 20, 50
 RSI_PERIOD = 14
 ATR_PERIOD = 14
 SL_ATR_MULT = 1.5      # EMA Cross: stop loss = 1.5 x ATR
-RR = 2.0               # take profit = 2 x risk
-EXPIRE_HOURS = 96      # close a trade as "expired" after this long
-DERIV_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+RR = 4.0               # take profit = 4 x risk (1:4)
+EXPIRE_HOURS = 240     # close a trade as "expired" after this long (10 days)
+DERIV_URLS = [  # tried in order; the first one that answers is used
+    "wss://api.derivws.com/trading/v1/options/ws/public",  # current public endpoint
+    "wss://ws.derivws.com/websockets/v3?app_id=1089",      # older endpoint (fallback)
+]
 STATE_FILE = Path("state/signals.json")
 # -----------------------------------------------------
 
@@ -107,10 +109,10 @@ def fetch_twelvedata(symbol):
     return only_closed(df)
 
 
-def fetch_deriv(symbol):
+def deriv_request(url, symbol):
     import websocket  # pip package: websocket-client
 
-    ws = websocket.create_connection(DERIV_URL, timeout=20)
+    ws = websocket.create_connection(url, timeout=20)
     try:
         ws.send(
             json.dumps(
@@ -132,9 +134,23 @@ def fetch_deriv(symbol):
     finally:
         ws.close()
     if "error" in data:
-        raise RuntimeError(data["error"].get("message", str(data["error"])))
+        raise RuntimeError(str(data["error"].get("message", data["error"])))
     if "candles" not in data:
         raise RuntimeError("no candles returned")
+    return data
+
+
+def fetch_deriv(symbol):
+    data, errors = None, []
+    for url in DERIV_URLS:
+        try:
+            data = deriv_request(url, symbol)
+            break
+        except Exception as e:
+            host = url.split("/")[2]
+            errors.append(f"{host}: {str(e)[:70]}")
+    if data is None:
+        raise RuntimeError(" | ".join(errors))
     df = pd.DataFrame(data["candles"])
     df["datetime"] = pd.to_datetime(df["epoch"], unit="s")
     for c in ["open", "high", "low", "close"]:
@@ -370,7 +386,7 @@ def main():
                 df = fetch_deriv(inst["symbol"])
             candles[inst["name"]] = add_indicators(df)
         except Exception as e:
-            print(f"Could not fetch {inst['name']}: {e}")
+            print(f"Could not fetch {inst['name']}: {str(e)[:200]}")
 
     print(f"Fetched {len(candles)} of {len(todo)} instruments.")
     if todo and not candles:
