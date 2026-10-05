@@ -8,6 +8,7 @@ Learning layer: every strategy x instrument combination has its own rolling reco
 A combination that is clearly losing is paused (no more posts to the channel) but keeps
 logging silent "shadow" trades, so it can switch itself back on if it recovers.
 Run `python signal_bot.py --backtest` to replay history and seed that learning.
+Run `python signal_bot.py --sweep` to compare R:R values and trend filters.
 """
 import json
 import os
@@ -45,7 +46,7 @@ RR = 4.0               # take profit = 4 x risk (1:4)
 EXPIRE_HOURS = 240     # close a trade as "expired" after this long (10 days)
 
 # --- learning layer ---
-LEARNING = True        # False = post every signal, never pause or remove anything
+LEARNING = True        # False = post every signal, never pause anything
 WINDOW = 20            # judge each combination on its last 20 finished trades
 MIN_TRADES = 8         # need at least this many finished trades before judging
 PAUSE_BELOW_R = 0.0    # pause when the window total drops below this (in R)
@@ -54,6 +55,11 @@ BACKTEST_MIN = 15      # a backtest needs this many trades before it can pause a
 BACKTEST_BARS = 5000   # candles to replay (about 7 months of forex H1)
 CUT_BELOW_R = -5.0     # REMOVE a combination if its backtest total is this bad (in R) ...
 CUT_MIN_TRADES = 10    # ... and the backtest had at least this many trades
+
+SWEEP_RRS = [1.5, 2.0, 3.0, 4.0]                      # reward:risk values the --sweep test compares
+SWEEP_FILTERS = ["none", "ema200", "ema200+slope"]    # trend filters the --sweep test compares
+TREND_EMA = 200
+SWEEP_FILE = Path("state/sweep.txt")
 
 DERIV_URLS = [  # tried in order; the first one that answers is used
     "wss://api.derivws.com/trading/v1/options/ws/public",  # current public endpoint
@@ -536,6 +542,103 @@ def run_backtest():
     print("Tip: a combination that wins in 'first70%' but loses in 'last30%' is probably luck.")
 
 
+# ---------- Sweep: compare R:R values and trend filters ----------
+def trend_ok(filt, side, close, ema, ema_old):
+    """Only allow trades that go with the long-term (200 EMA) trend."""
+    if filt == "none":
+        return True
+    up, down = close > ema, close < ema
+    if filt == "ema200+slope":  # the 200 EMA itself must also be sloping the same way
+        up, down = up and ema > ema_old, down and ema < ema_old
+    return up if side == "BUY" else down
+
+
+def run_sweep():
+    data = []
+    for k, inst in enumerate(INSTRUMENTS):
+        try:
+            if inst["kind"] == "forex":
+                if k:
+                    time.sleep(8)
+                df = fetch_twelvedata(inst["symbol"], BACKTEST_BARS)
+            else:
+                df = fetch_deriv(inst["symbol"], BACKTEST_BARS)
+            data.append((inst, add_indicators(df).reset_index(drop=True)))
+        except Exception as e:
+            print(f"Could not fetch {inst['name']}: {str(e)[:200]}")
+    if not data:
+        print("Sweep found no data. Check your API keys and connections.")
+        sys.exit(1)
+
+    expire = max(1, EXPIRE_HOURS * 3600 // CANDLE_SECONDS)
+    rows = {}  # (kind, strategy, filter, rr) -> list of (is_early, r, won)
+    for inst, df in data:
+        highs, lows, closes = df["high"].values, df["low"].values, df["close"].values
+        ema = df["close"].ewm(span=TREND_EMA, adjust=False).mean().values
+        split = int(len(df) * 0.7)
+        start = TREND_EMA + 10
+        for strategy in STRATEGIES:
+            func = STRATEGY_FUNCS[strategy]
+            cands = []
+            for i in range(start, len(df) - 1):
+                sig = func(inst, df.iloc[: i + 1])
+                if sig:
+                    cands.append((i, sig))
+            for filt in SWEEP_FILTERS:
+                kept = [(i, sg) for i, sg in cands
+                        if trend_ok(filt, sg["side"], closes[i], ema[i], ema[i - 10])]
+                for rr in SWEEP_RRS:
+                    out = rows.setdefault((inst["kind"], strategy, filt, rr), [])
+                    busy = -1
+                    for i, sg in kept:
+                        if i <= busy:
+                            continue
+                        risk = abs(sg["entry"] - sg["sl"])
+                        if risk <= 0:
+                            continue
+                        tp = sg["entry"] + rr * risk if sg["side"] == "BUY" else sg["entry"] - rr * risk
+                        end = min(len(df), i + 1 + expire)
+                        result, j = walk_trade(sg["side"], sg["sl"], tp, highs[i + 1:end], lows[i + 1:end])
+                        if result is None:
+                            if end - (i + 1) < expire:
+                                continue
+                            result, j = "EXPIRED", expire - 1
+                        busy = i + 1 + j
+                        r = rr if result == "TP" else (-1.0 if result == "SL" else 0.0)
+                        out.append((i < split, r, result == "TP"))
+        print(f"{inst['name']}: swept {len(df)} candles")
+
+    lines = ["==== SWEEP (R = multiples of the amount risked) ===="]
+    lines.append("Each row pools every instrument of that type. 'good' = positive in BOTH the early 70% and the late 30%.")
+    for kind in ("forex", "synthetic"):
+        for strategy in STRATEGIES:
+            lines.append("")
+            lines.append(f"-- {kind.upper()} / {strategy} --")
+            lines.append(f"{'filter':13s} {'R:R':>4s} {'trades':>6s} {'win%':>5s} {'need%':>5s} {'total R':>8s} {'R/trade':>8s} {'early R':>8s} {'late R':>8s}")
+            for filt in SWEEP_FILTERS:
+                for rr in SWEEP_RRS:
+                    t = rows.get((kind, strategy, filt, rr), [])
+                    n = sum(1 for x in t if x[1] != 0)
+                    if not t:
+                        continue
+                    wins = sum(1 for x in t if x[2])
+                    total = sum(x[1] for x in t)
+                    early = sum(x[1] for x in t if x[0])
+                    late = sum(x[1] for x in t if not x[0])
+                    good = "  good" if early > 0 and late > 0 and n >= 30 else ""
+                    lines.append(
+                        f"{filt:13s} {rr:4.1f} {n:6d} {100 * wins / max(n, 1):5.0f} {100 / (1 + rr):5.0f} "
+                        f"{total:+8.1f} {total / len(t):+8.2f} {early:+8.1f} {late:+8.1f}{good}"
+                    )
+    lines.append("")
+    lines.append("win% must beat need% (the break-even rate) before costs. Spreads and slippage are NOT included.")
+    lines.append("Many variants were tried, so a lucky winner is likely. Trust only rows marked good with 30+ trades.")
+    text = "\n".join(lines)
+    print(text)
+    SWEEP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SWEEP_FILE.write_text(text + "\n")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -544,6 +647,9 @@ def main():
         return
     if "--backtest" in sys.argv:
         run_backtest()
+        return
+    if "--sweep" in sys.argv:
+        run_sweep()
         return
 
     now = datetime.now(timezone.utc)
