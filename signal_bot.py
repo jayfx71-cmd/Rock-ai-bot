@@ -1,8 +1,13 @@
 """
-Free automated signal bot (Forex + Deriv synthetic indices).
+Free automated signal bot (Forex + Deriv synthetic indices) with a learning layer.
 Strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
 ATR-based stop loss, 1:4 risk/reward. Runs on a schedule via GitHub Actions,
 posts to a Telegram channel, and tracks TP/SL results per strategy in state/signals.json.
+
+Learning layer: every strategy x instrument combination has its own rolling record.
+A combination that is clearly losing is paused (no more posts to the channel) but keeps
+logging silent "shadow" trades, so it can switch itself back on if it recovers.
+Run `python signal_bot.py --backtest` to replay history and seed that learning.
 """
 import json
 import os
@@ -38,11 +43,22 @@ ATR_PERIOD = 14
 SL_ATR_MULT = 1.5      # EMA Cross: stop loss = 1.5 x ATR
 RR = 4.0               # take profit = 4 x risk (1:4)
 EXPIRE_HOURS = 240     # close a trade as "expired" after this long (10 days)
+
+# --- learning layer ---
+LEARNING = True        # False = post every signal, never pause anything
+WINDOW = 20            # judge each combination on its last 20 finished trades
+MIN_TRADES = 8         # need at least this many finished trades before judging
+PAUSE_BELOW_R = 0.0    # pause when the window total drops below this (in R)
+RESUME_AT_R = 1.0      # switch back on when the window total reaches this (in R)
+BACKTEST_MIN = 15      # a backtest needs this many trades before it can pause a combo
+BACKTEST_BARS = 5000   # candles to replay (about 7 months of forex H1)
+
 DERIV_URLS = [  # tried in order; the first one that answers is used
     "wss://api.derivws.com/trading/v1/options/ws/public",  # current public endpoint
     "wss://ws.derivws.com/websockets/v3?app_id=1089",      # older endpoint (fallback)
 ]
 STATE_FILE = Path("state/signals.json")
+BACKTEST_FILE = Path("state/backtest.json")
 # -----------------------------------------------------
 
 TD_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
@@ -70,8 +86,10 @@ def load_state():
         state = json.loads(STATE_FILE.read_text())
     else:
         state = {"open": [], "closed": [], "last_signal": {}}
+    state.setdefault("paused", {})
     for t in state["open"] + state["closed"]:
         t.setdefault("strategy", "EMA Cross")  # trades saved by the first version
+        t.setdefault("live", True)             # False = silent shadow trade
     return state
 
 
@@ -80,23 +98,34 @@ def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+def load_backtest():
+    try:
+        return json.loads(BACKTEST_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def combo_key(strategy, pair):
+    return f"{strategy}|{pair}"
+
+
 # ---------- Data ----------
 def only_closed(df):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     return df[df["datetime"] + timedelta(seconds=CANDLE_SECONDS) <= now].reset_index(drop=True)
 
 
-def fetch_twelvedata(symbol):
+def fetch_twelvedata(symbol, count=CANDLE_COUNT):
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
             "symbol": symbol,
             "interval": "1h",
-            "outputsize": CANDLE_COUNT,
+            "outputsize": count,
             "timezone": "UTC",
             "apikey": TD_KEY,
         },
-        timeout=30,
+        timeout=60,
     )
     data = r.json()
     if "values" not in data:
@@ -109,17 +138,17 @@ def fetch_twelvedata(symbol):
     return only_closed(df)
 
 
-def deriv_request(url, symbol):
+def deriv_request(url, symbol, count):
     import websocket  # pip package: websocket-client
 
-    ws = websocket.create_connection(url, timeout=20)
+    ws = websocket.create_connection(url, timeout=30)
     try:
         ws.send(
             json.dumps(
                 {
                     "ticks_history": symbol,
                     "adjust_start_time": 1,
-                    "count": CANDLE_COUNT,
+                    "count": count,
                     "end": "latest",
                     "granularity": CANDLE_SECONDS,
                     "style": "candles",
@@ -140,11 +169,11 @@ def deriv_request(url, symbol):
     return data
 
 
-def fetch_deriv(symbol):
+def fetch_deriv(symbol, count=CANDLE_COUNT):
     data, errors = None, []
     for url in DERIV_URLS:
         try:
-            data = deriv_request(url, symbol)
+            data = deriv_request(url, symbol, count)
             break
         except Exception as e:
             host = url.split("/")[2]
@@ -214,6 +243,7 @@ def build_signal(inst, strategy, side, entry, sl, candle_time):
         "unit": unit_label(inst),
         "candle": candle_time.isoformat(),
         "opened_at": datetime.now(timezone.utc).isoformat(),
+        "live": True,
     }
 
 
@@ -306,12 +336,28 @@ def record(trades):
 
 
 def stats_line(state, strategy):
-    w, l, rate, r = record([t for t in state["closed"] if t.get("strategy") == strategy])
-    aw, al, arate, ar = record(state["closed"])
+    # Public record: only signals that were actually posted to the channel.
+    posted = [t for t in state["closed"] if t.get("live", True)]
+    w, l, rate, r = record([t for t in posted if t.get("strategy") == strategy])
+    aw, al, arate, ar = record(posted)
     return (
         f"📊 {strategy}: {w}W / {l}L ({rate:.0f}%) | {r:+.1f}R\n"
         f"📊 All strategies: {aw}W / {al}L ({arate:.0f}%) | {ar:+.1f}R"
     )
+
+
+def walk_trade(side, sl, tp, highs, lows):
+    """Return (result, index) for the first candle that hits SL or TP, else (None, None)."""
+    for j in range(len(highs)):
+        if side == "BUY":
+            hit_sl, hit_tp = lows[j] <= sl, highs[j] >= tp
+        else:
+            hit_sl, hit_tp = highs[j] >= sl, lows[j] <= tp
+        if hit_sl:  # if both hit in one candle, count the loss (conservative)
+            return "SL", j
+        if hit_tp:
+            return "TP", j
+    return None, None
 
 
 def resolve_open(state, candles):
@@ -323,19 +369,8 @@ def resolve_open(state, candles):
             still_open.append(t)
             continue
 
-        result = None
         after = df[df["datetime"] > pd.Timestamp(t["candle"])]
-        for _, c in after.iterrows():
-            if t["side"] == "BUY":
-                hit_sl, hit_tp = c.low <= t["sl"], c.high >= t["tp"]
-            else:
-                hit_sl, hit_tp = c.high >= t["sl"], c.low <= t["tp"]
-            if hit_sl:  # if both hit in one candle, count the loss (conservative)
-                result = "SL"
-                break
-            if hit_tp:
-                result = "TP"
-                break
+        result, _ = walk_trade(t["side"], t["sl"], t["tp"], after["high"].values, after["low"].values)
 
         if result is None:
             opened = datetime.fromisoformat(t["opened_at"])
@@ -351,12 +386,142 @@ def resolve_open(state, candles):
         t["closed_at"] = now.isoformat()
         state["closed"].append(t)
 
-        label = {"TP": "✅ TP hit", "SL": "❌ SL hit", "EXPIRED": "⏱ Expired"}[result]
-        send(
-            f"{label}: <b>{t['side']} {t['pair']}</b> ({t['strategy']})\n"
-            f"Result: {t['r']:+.1f}R\n\n{stats_line(state, t['strategy'])}"
-        )
+        if t.get("live", True):  # shadow trades never message the channel
+            label = {"TP": "✅ TP hit", "SL": "❌ SL hit", "EXPIRED": "⏱ Expired"}[result]
+            send(
+                f"{label}: <b>{t['side']} {t['pair']}</b> ({t['strategy']})\n"
+                f"Result: {t['r']:+.1f}R\n\n{stats_line(state, t['strategy'])}"
+            )
     state["open"] = still_open
+
+
+# ---------- Learning layer ----------
+def window_trades(state, key):
+    """Last WINDOW finished (TP/SL) trades of one combination, live and shadow together."""
+    done = [
+        t for t in state["closed"]
+        if combo_key(t["strategy"], t["pair"]) == key and t["result"] in ("TP", "SL")
+    ]
+    done.sort(key=lambda t: t.get("closed_at", ""))
+    return done[-WINDOW:]
+
+
+def combo_active(state, key, backtest):
+    """Decide whether a strategy x instrument combination may post to the channel."""
+    if not LEARNING:
+        return True
+    was_paused = state["paused"].get(key, False)
+    recent = window_trades(state, key)
+    if len(recent) >= MIN_TRADES:  # enough live/shadow evidence: it decides
+        total = sum(t["r"] for t in recent)
+        paused = (total < RESUME_AT_R) if was_paused else (total < PAUSE_BELOW_R)
+        why = f"last {len(recent)} trades = {total:+.1f}R"
+    else:  # not enough evidence yet: lean on the backtest, if there is one
+        bt = backtest.get(key)
+        paused = bool(bt and bt["n"] >= BACKTEST_MIN and bt["r"] < 0)
+        why = f"backtest {bt['n']} trades = {bt['r']:+.1f}R" if bt else "no data yet"
+    if paused != was_paused:
+        print(f"LEARNING: {key} {'PAUSED' if paused else 'RESUMED'} ({why})")
+    state["paused"][key] = paused
+    return not paused
+
+
+def print_leaderboard(state, backtest):
+    keys = set(state["paused"]) | set(backtest)
+    keys |= {combo_key(t["strategy"], t["pair"]) for t in state["open"] + state["closed"]}
+    if not keys:
+        return
+    print("---- LEARNING LEADERBOARD (strategy | pair) ----")
+    rows = []
+    for key in sorted(keys):
+        recent = window_trades(state, key)
+        r_recent = sum(t["r"] for t in recent)
+        bt = backtest.get(key)
+        bt_txt = f"bt {bt['n']}tr {bt['r']:+.1f}R" if bt else "bt -"
+        status = "PAUSED" if state["paused"].get(key) else "active"
+        rows.append((key, status, f"{len(recent)}tr {r_recent:+.1f}R", bt_txt))
+    for key, status, live_txt, bt_txt in rows:
+        print(f"{status:7s} {key:40s} recent {live_txt:14s} {bt_txt}")
+    print("-------------------------------------------------")
+
+
+# ---------- Backtest ----------
+def simulate(inst, df):
+    """Replay history candle by candle: no peeking, one open trade per strategy at a time."""
+    highs, lows = df["high"].values, df["low"].values
+    expire = max(1, EXPIRE_HOURS * 3600 // CANDLE_SECONDS)
+    trades = []
+    for strategy in STRATEGIES:
+        func = STRATEGY_FUNCS[strategy]
+        busy_until = -1
+        for i in range(SLOW_EMA + 6, len(df) - 1):
+            if i <= busy_until:
+                continue
+            sig = func(inst, df.iloc[: i + 1])
+            if not sig:
+                continue
+            end = min(len(df), i + 1 + expire)
+            result, j = walk_trade(sig["side"], sig["sl"], sig["tp"], highs[i + 1:end], lows[i + 1:end])
+            if result is None:
+                if end - (i + 1) < expire:  # history ended before the trade could finish
+                    continue
+                result, j = "EXPIRED", expire - 1
+            busy_until = i + 1 + j
+            r = RR if result == "TP" else (-1.0 if result == "SL" else 0.0)
+            trades.append({"strategy": strategy, "pair": inst["name"], "i": i, "result": result, "r": r})
+    return trades
+
+
+def summarize(trades, split_index):
+    out = {}
+    for key in sorted({combo_key(t["strategy"], t["pair"]) for t in trades}):
+        mine = [t for t in trades if combo_key(t["strategy"], t["pair"]) == key]
+        early = [t for t in mine if t["i"] < split_index[key.split("|")[1]]]
+        late = [t for t in mine if t["i"] >= split_index[key.split("|")[1]]]
+        w, l, rate, r = record(mine)
+        out[key] = {
+            "n": w + l, "wins": w, "win_rate": round(rate, 1), "r": round(r, 1),
+            "first_70_r": round(sum(t["r"] for t in early), 1), "first_70_n": len(early),
+            "last_30_r": round(sum(t["r"] for t in late), 1), "last_30_n": len(late),
+        }
+    return out
+
+
+def run_backtest():
+    all_trades, split_index = [], {}
+    for k, inst in enumerate(INSTRUMENTS):
+        try:
+            if inst["kind"] == "forex":
+                if k:
+                    time.sleep(8)
+                df = fetch_twelvedata(inst["symbol"], BACKTEST_BARS)
+            else:
+                df = fetch_deriv(inst["symbol"], BACKTEST_BARS)
+            df = add_indicators(df)
+        except Exception as e:
+            print(f"Could not fetch {inst['name']}: {str(e)[:200]}")
+            continue
+        split_index[inst["name"]] = int(len(df) * 0.7)
+        trades = simulate(inst, df)
+        all_trades += trades
+        print(f"{inst['name']}: {len(df)} candles, {len(trades)} trades simulated")
+    if not all_trades:
+        print("Backtest produced no trades. Check your API keys and connections.")
+        sys.exit(1)
+
+    result = summarize(all_trades, split_index)
+    BACKTEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BACKTEST_FILE.write_text(json.dumps(result, indent=2))
+
+    print("\n==== BACKTEST RESULTS (R = multiples of the amount risked) ====")
+    print(f"{'combination':38s} {'trades':>6s} {'win%':>5s} {'total R':>8s} {'first70% R':>11s} {'last30% R':>10s}")
+    for key, v in sorted(result.items(), key=lambda kv: -kv[1]["r"]):
+        print(f"{key:38s} {v['n']:6d} {v['win_rate']:5.0f} {v['r']:+8.1f} {v['first_70_r']:+11.1f} {v['last_30_r']:+10.1f}")
+    for strategy in STRATEGIES:
+        mine = [t for t in all_trades if t["strategy"] == strategy]
+        w, l, rate, r = record(mine)
+        print(f"ALL {strategy}: {w + l} trades, {rate:.0f}% win rate, {r:+.1f}R")
+    print("Tip: a combination that wins in 'first70%' but loses in 'last30%' is probably luck.")
 
 
 # ---------- Main ----------
@@ -364,6 +529,9 @@ def main():
     if "--test" in sys.argv:
         send("✅ Bot is connected and working.")
         print("Test message sent.")
+        return
+    if "--backtest" in sys.argv:
+        run_backtest()
         return
 
     now = datetime.now(timezone.utc)
@@ -373,6 +541,7 @@ def main():
         print("Weekend: skipping forex, running synthetic indices only.")
 
     state = load_state()
+    backtest = load_backtest()
     candles = {}
     first_forex = True
     for inst in todo:
@@ -404,13 +573,23 @@ def main():
             if any(t["pair"] == inst["name"] and t["strategy"] == strategy for t in state["open"]):
                 continue  # one open trade per instrument per strategy
             sig = STRATEGY_FUNCS[strategy](inst, df)
-            key = f"{strategy}|{inst['name']}"
+            key = combo_key(strategy, inst["name"])
             if sig and state["last_signal"].get(key) != sig["candle"]:
-                send(format_signal(sig))
+                sig["live"] = combo_active(state, key, backtest)
+                if sig["live"]:
+                    send(format_signal(sig))
+                else:
+                    print(f"Shadow trade (paused, not posted): {key} {sig['side']} @ {sig['entry']}")
                 state["open"].append(sig)
                 state["last_signal"][key] = sig["candle"]
                 save_state(state)
 
+    # keep every combination's pause state fresh, even when it had no new signal
+    for strategy in STRATEGIES:
+        for inst in INSTRUMENTS:
+            combo_active(state, combo_key(strategy, inst["name"]), backtest)
+    save_state(state)
+    print_leaderboard(state, backtest)
     print("Run complete.")
 
 
