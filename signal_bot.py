@@ -1,8 +1,8 @@
 """
-Free automated Forex signal bot.
-Strategy: EMA 20/50 crossover + RSI filter, ATR-based stop loss, 1:2 risk/reward.
-Runs on a schedule via GitHub Actions, posts to a Telegram channel,
-and tracks TP/SL results in state/signals.json.
+Free automated signal bot (Forex + Deriv synthetic indices).
+Strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
+ATR-based stop loss, 1:2 risk/reward. Runs on a schedule via GitHub Actions,
+posts to a Telegram channel, and tracks TP/SL results per strategy in state/signals.json.
 """
 import json
 import os
@@ -15,20 +15,40 @@ import pandas as pd
 import requests
 
 # ---------------- CONFIG (edit these) ----------------
-PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
-INTERVAL = "1h"
+FOREX = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "GBP/JPY"]
+
+# Deriv synthetic indices: display name -> Deriv symbol code (trade 24/7)
+SYNTHETICS = {
+    "Volatility 75": "R_75",
+    "Volatility 75 (1s)": "1HZ75V",
+    "Volatility 25": "R_25",
+    "Volatility 25 (1s)": "1HZ25V",
+    "Volatility 100": "R_100",
+    "Volatility 100 (1s)": "1HZ100V",
+    "Volatility 90 (1s)": "1HZ90V",
+}
+
+STRATEGIES = ["EMA Cross", "Price Action"]  # delete a name here to switch that strategy off
+
+CANDLE_SECONDS = 3600  # H1 candles
+CANDLE_COUNT = 250
 FAST_EMA, SLOW_EMA = 20, 50
 RSI_PERIOD = 14
 ATR_PERIOD = 14
-SL_ATR_MULT = 1.5      # stop loss = 1.5 x ATR
+SL_ATR_MULT = 1.5      # EMA Cross: stop loss = 1.5 x ATR
 RR = 2.0               # take profit = 2 x risk
 EXPIRE_HOURS = 96      # close a trade as "expired" after this long
+DERIV_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 STATE_FILE = Path("state/signals.json")
 # -----------------------------------------------------
 
 TD_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+INSTRUMENTS = [{"name": p, "kind": "forex", "symbol": p} for p in FOREX] + [
+    {"name": n, "kind": "synthetic", "symbol": s} for n, s in SYNTHETICS.items()
+]
 
 
 # ---------- Telegram ----------
@@ -44,8 +64,12 @@ def send(text):
 # ---------- State ----------
 def load_state():
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"open": [], "closed": [], "last_signal": {}}
+        state = json.loads(STATE_FILE.read_text())
+    else:
+        state = {"open": [], "closed": [], "last_signal": {}}
+    for t in state["open"] + state["closed"]:
+        t.setdefault("strategy", "EMA Cross")  # trades saved by the first version
+    return state
 
 
 def save_state(state):
@@ -54,13 +78,18 @@ def save_state(state):
 
 
 # ---------- Data ----------
-def fetch_candles(pair):
+def only_closed(df):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return df[df["datetime"] + timedelta(seconds=CANDLE_SECONDS) <= now].reset_index(drop=True)
+
+
+def fetch_twelvedata(symbol):
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
-            "symbol": pair,
-            "interval": INTERVAL,
-            "outputsize": 120,
+            "symbol": symbol,
+            "interval": "1h",
+            "outputsize": CANDLE_COUNT,
             "timezone": "UTC",
             "apikey": TD_KEY,
         },
@@ -74,10 +103,43 @@ def fetch_candles(pair):
     for c in ["open", "high", "low", "close"]:
         df[c] = df[c].astype(float)
     df = df.sort_values("datetime").reset_index(drop=True)
-    # keep only fully closed candles
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    df = df[df["datetime"] + timedelta(hours=1) <= now].reset_index(drop=True)
-    return df
+    return only_closed(df)
+
+
+def fetch_deriv(symbol):
+    import websocket  # pip package: websocket-client
+
+    ws = websocket.create_connection(DERIV_URL, timeout=20)
+    try:
+        ws.send(
+            json.dumps(
+                {
+                    "ticks_history": symbol,
+                    "adjust_start_time": 1,
+                    "count": CANDLE_COUNT,
+                    "end": "latest",
+                    "granularity": CANDLE_SECONDS,
+                    "style": "candles",
+                }
+            )
+        )
+        data = {}
+        for _ in range(5):  # skip any unrelated messages
+            data = json.loads(ws.recv())
+            if "candles" in data or "error" in data:
+                break
+    finally:
+        ws.close()
+    if "error" in data:
+        raise RuntimeError(data["error"].get("message", str(data["error"])))
+    if "candles" not in data:
+        raise RuntimeError("no candles returned")
+    df = pd.DataFrame(data["candles"])
+    df["datetime"] = pd.to_datetime(df["epoch"], unit="s")
+    for c in ["open", "high", "low", "close"]:
+        df[c] = df[c].astype(float)
+    df = df.sort_values("datetime").reset_index(drop=True)
+    return only_closed(df)
 
 
 def add_indicators(df):
@@ -103,68 +165,136 @@ def add_indicators(df):
     return df
 
 
-# ---------- Strategy ----------
-def decimals(pair):
-    return 3 if "JPY" in pair else 5
+# ---------- Helpers ----------
+def decimals(inst):
+    if inst["kind"] == "synthetic":
+        return 4
+    return 3 if "JPY" in inst["name"] else 5
 
 
-def pip_size(pair):
-    return 0.01 if "JPY" in pair else 0.0001
+def unit_size(inst):
+    if inst["kind"] == "synthetic":
+        return 1.0
+    return 0.01 if "JPY" in inst["name"] else 0.0001
 
 
-def check_signal(pair, df):
+def unit_label(inst):
+    return "pts" if inst["kind"] == "synthetic" else "pips"
+
+
+def build_signal(inst, strategy, side, entry, sl, candle_time):
+    risk = abs(entry - sl)
+    tp = entry + RR * risk if side == "BUY" else entry - RR * risk
+    d = decimals(inst)
+    return {
+        "pair": inst["name"],
+        "strategy": strategy,
+        "side": side,
+        "entry": round(entry, d),
+        "sl": round(sl, d),
+        "tp": round(tp, d),
+        "risk_pips": round(risk / unit_size(inst), 1),
+        "unit": unit_label(inst),
+        "candle": candle_time.isoformat(),
+        "opened_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------- Strategy 1: EMA cross + RSI ----------
+def strategy_ema_cross(inst, df):
     if len(df) < SLOW_EMA + 5:
         return None
     prev, last = df.iloc[-2], df.iloc[-1]
     crossed_up = prev.ema_fast <= prev.ema_slow and last.ema_fast > last.ema_slow
     crossed_down = prev.ema_fast >= prev.ema_slow and last.ema_fast < last.ema_slow
 
+    entry = float(last.close)
+    risk = SL_ATR_MULT * float(last.atr)
     if crossed_up and 50 < last.rsi < 70:
+        return build_signal(inst, "EMA Cross", "BUY", entry, entry - risk, last.datetime)
+    if crossed_down and 30 < last.rsi < 50:
+        return build_signal(inst, "EMA Cross", "SELL", entry, entry + risk, last.datetime)
+    return None
+
+
+# ---------- Strategy 2: Price action (engulfing candle at the 50 EMA) ----------
+def strategy_price_action(inst, df):
+    if len(df) < SLOW_EMA + 5:
+        return None
+    prev, last = df.iloc[-2], df.iloc[-1]
+    atr = float(last.atr)
+    if not atr > 0:
+        return None
+    if abs(last.close - last.open) < 0.5 * atr:  # engulfing candle must be strong
+        return None
+
+    uptrend = last.ema_fast > last.ema_slow
+    downtrend = last.ema_fast < last.ema_slow
+    near = 0.25 * atr
+
+    bullish = (
+        prev.close < prev.open
+        and last.close > last.open
+        and last.close >= prev.open
+        and last.open <= prev.close
+    )
+    bearish = (
+        prev.close > prev.open
+        and last.close < last.open
+        and last.close <= prev.open
+        and last.open >= prev.close
+    )
+
+    entry = float(last.close)
+    if uptrend and bullish and last.low <= last.ema_slow + near and last.close > last.ema_slow:
         side = "BUY"
-    elif crossed_down and 30 < last.rsi < 50:
+        sl = min(float(prev.low), float(last.low)) - 0.2 * atr
+    elif downtrend and bearish and last.high >= last.ema_slow - near and last.close < last.ema_slow:
         side = "SELL"
+        sl = max(float(prev.high), float(last.high)) + 0.2 * atr
     else:
         return None
 
-    entry = float(last.close)
-    risk = SL_ATR_MULT * float(last.atr)
-    d = decimals(pair)
-    if side == "BUY":
-        sl, tp = entry - risk, entry + RR * risk
-    else:
-        sl, tp = entry + risk, entry - RR * risk
+    risk = abs(entry - sl)
+    if risk > 3 * atr:  # stop too far away, skip
+        return None
+    if risk < 0.5 * atr:  # stop too tight, widen it
+        sl = entry - 0.5 * atr if side == "BUY" else entry + 0.5 * atr
+    return build_signal(inst, "Price Action", side, entry, sl, last.datetime)
 
-    return {
-        "pair": pair,
-        "side": side,
-        "entry": round(entry, d),
-        "sl": round(sl, d),
-        "tp": round(tp, d),
-        "risk_pips": round(risk / pip_size(pair), 1),
-        "candle": last.datetime.isoformat(),
-        "opened_at": datetime.now(timezone.utc).isoformat(),
-    }
+
+STRATEGY_FUNCS = {"EMA Cross": strategy_ema_cross, "Price Action": strategy_price_action}
 
 
 def format_signal(s):
     icon = "🟢" if s["side"] == "BUY" else "🔴"
     return (
-        f"{icon} <b>{s['side']} {s['pair']}</b> (H1)\n\n"
+        f"{icon} <b>{s['side']} {s['pair']}</b> (H1)\n"
+        f"Strategy: {s['strategy']}\n\n"
         f"Entry: <code>{s['entry']}</code>\n"
-        f"Stop loss: <code>{s['sl']}</code> ({s['risk_pips']} pips)\n"
+        f"Stop loss: <code>{s['sl']}</code> ({s['risk_pips']} {s.get('unit', 'pips')})\n"
         f"Take profit: <code>{s['tp']}</code> (1:{RR:g})\n\n"
         f"⚠️ Risk 1% or less per trade. Not financial advice."
     )
 
 
 # ---------- Result tracking ----------
-def stats_line(state):
-    closed = [t for t in state["closed"] if t["result"] in ("TP", "SL")]
-    wins = sum(1 for t in closed if t["result"] == "TP")
-    total_r = sum(t["r"] for t in state["closed"])
-    n = len(closed)
+def record(trades):
+    scored = [t for t in trades if t["result"] in ("TP", "SL")]
+    wins = sum(1 for t in scored if t["result"] == "TP")
+    total_r = sum(t["r"] for t in trades)
+    n = len(scored)
     rate = (wins / n * 100) if n else 0
-    return f"📊 Record: {wins}W / {n - wins}L ({rate:.0f}% win rate) | Total: {total_r:+.1f}R"
+    return wins, n - wins, rate, total_r
+
+
+def stats_line(state, strategy):
+    w, l, rate, r = record([t for t in state["closed"] if t.get("strategy") == strategy])
+    aw, al, arate, ar = record(state["closed"])
+    return (
+        f"📊 {strategy}: {w}W / {l}L ({rate:.0f}%) | {r:+.1f}R\n"
+        f"📊 All strategies: {aw}W / {al}L ({arate:.0f}%) | {ar:+.1f}R"
+    )
 
 
 def resolve_open(state, candles):
@@ -206,8 +336,8 @@ def resolve_open(state, candles):
 
         label = {"TP": "✅ TP hit", "SL": "❌ SL hit", "EXPIRED": "⏱ Expired"}[result]
         send(
-            f"{label}: <b>{t['side']} {t['pair']}</b>\n"
-            f"Result: {t['r']:+.1f}R\n\n{stats_line(state)}"
+            f"{label}: <b>{t['side']} {t['pair']}</b> ({t['strategy']})\n"
+            f"Result: {t['r']:+.1f}R\n\n{stats_line(state, t['strategy'])}"
         )
     state["open"] = still_open
 
@@ -220,32 +350,49 @@ def main():
         return
 
     now = datetime.now(timezone.utc)
-    if now.weekday() >= 5:
-        print("Weekend, market closed. Skipping.")
-        return
+    weekend = now.weekday() >= 5
+    todo = [i for i in INSTRUMENTS if not (weekend and i["kind"] == "forex")]
+    if weekend:
+        print("Weekend: skipping forex, running synthetic indices only.")
 
     state = load_state()
     candles = {}
-    for i, pair in enumerate(PAIRS):
-        if i:
-            time.sleep(8)  # stay under the free-tier rate limit
+    first_forex = True
+    for inst in todo:
         try:
-            candles[pair] = add_indicators(fetch_candles(pair))
+            if inst["kind"] == "forex":
+                if not first_forex:
+                    time.sleep(8)  # stay under the free-tier rate limit
+                first_forex = False
+                df = fetch_twelvedata(inst["symbol"])
+            else:
+                df = fetch_deriv(inst["symbol"])
+            candles[inst["name"]] = add_indicators(df)
         except Exception as e:
-            print(f"Could not fetch {pair}: {e}")
+            print(f"Could not fetch {inst['name']}: {e}")
+
+    print(f"Fetched {len(candles)} of {len(todo)} instruments.")
+    if todo and not candles:
+        print("Nothing could be fetched. Check your API keys and connections.")
+        sys.exit(1)
 
     resolve_open(state, candles)
     save_state(state)
 
-    for pair, df in candles.items():
-        if any(t["pair"] == pair for t in state["open"]):
-            continue  # one open trade per pair
-        sig = check_signal(pair, df)
-        if sig and state["last_signal"].get(pair) != sig["candle"]:
-            send(format_signal(sig))
-            state["open"].append(sig)
-            state["last_signal"][pair] = sig["candle"]
-            save_state(state)
+    for inst in todo:
+        df = candles.get(inst["name"])
+        if df is None:
+            continue
+        for strategy in STRATEGIES:
+            if any(t["pair"] == inst["name"] and t["strategy"] == strategy for t in state["open"]):
+                continue  # one open trade per instrument per strategy
+            sig = STRATEGY_FUNCS[strategy](inst, df)
+            key = f"{strategy}|{inst['name']}"
+            if sig and state["last_signal"].get(key) != sig["candle"]:
+                send(format_signal(sig))
+                state["open"].append(sig)
+                state["last_signal"][key] = sig["candle"]
+                save_state(state)
 
     print("Run complete.")
 
