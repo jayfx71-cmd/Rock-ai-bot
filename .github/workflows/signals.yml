@@ -2,11 +2,15 @@ name: Forex signals
 
 on:
   schedule:
-    - cron: "5 * * * 1-5"
+    - cron: "5 * * * 1-5"   # 5 minutes past every hour, Mon-Fri (UTC)
   workflow_dispatch:
     inputs:
       test:
         description: "Only send a test message to Telegram"
+        type: boolean
+        default: false
+      news_only:
+        description: "Only post the news items (brief, alerts, headlines)"
         type: boolean
         default: false
 
@@ -35,11 +39,11 @@ jobs:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python signal_bot.py ${{ inputs.test && '--test' || '' }}
+        run: python signal_bot.py ${{ inputs.test && '--test' || (inputs.news_only && '--news' || '') }}
 
       - name: Save results
         run: |
           git config user.name "signal-bot"
           git config user.email "signal-bot@users.noreply.github.com"
-          git add state/signals.json
+          git add -A state
           git diff --staged --quiet || (git commit -m "Update signal state" && git push)
