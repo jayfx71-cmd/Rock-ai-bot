@@ -1,6 +1,20 @@
 {
   "open": [
     {
+      "pair": "AUD/USD",
+      "strategy": "EMA Cross",
+      "side": "SELL",
+      "entry": 0.69358,
+      "sl": 0.69498,
+      "tp": 0.69077,
+      "risk_pips": 14.0,
+      "unit": "pips",
+      "candle": "2026-10-05T02:00:00",
+      "opened_at": "2026-10-05T03:26:44.116622+00:00"
+    }
+  ],
+  "closed": [
+    {
       "pair": "USD/JPY",
       "strategy": "EMA Cross",
       "side": "SELL",
@@ -10,11 +24,14 @@
       "risk_pips": 21.0,
       "unit": "pips",
       "candle": "2026-10-04T23:00:00",
-      "opened_at": "2026-10-05T00:34:12.313626+00:00"
+      "opened_at": "2026-10-05T00:34:12.313626+00:00",
+      "result": "SL",
+      "r": -1.0,
+      "closed_at": "2026-10-05T03:26:43.555213+00:00"
     }
   ],
-  "closed": [],
   "last_signal": {
-    "EMA Cross|USD/JPY": "2026-10-04T23:00:00"
+    "EMA Cross|USD/JPY": "2026-10-04T23:00:00",
+    "EMA Cross|AUD/USD": "2026-10-05T02:00:00"
   }
 }
