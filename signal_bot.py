@@ -1,19 +1,22 @@
 """
 Free automated signal bot (Forex + Deriv synthetic indices) with a learning layer.
 Strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
-ATR-based stop loss, 1:4 risk/reward. Runs on a schedule via GitHub Actions,
+ATR-based stop loss, two targets (TP1 1:3, TP2 1:4). Runs on a schedule via GitHub Actions,
 posts to a Telegram channel, and tracks TP/SL results per strategy in state/signals.json.
 
 Learning layer: every strategy x instrument combination has its own rolling record.
 A combination that is clearly losing is paused (no more posts to the channel) but keeps
 logging silent "shadow" trades, so it can switch itself back on if it recovers.
 Run `python signal_bot.py --backtest` to replay history and seed that learning.
-Run `python signal_bot.py --sweep` to compare R:R values and trend filters.
+Run `python signal_bot.py --sweep` to compare target sizes and trend filters.
+Run `python signal_bot.py --news` to post only the news items (brief, alerts, headlines).
 """
+import html
 import json
 import os
 import sys
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,7 +45,10 @@ FAST_EMA, SLOW_EMA = 20, 50
 RSI_PERIOD = 14
 ATR_PERIOD = 14
 SL_ATR_MULT = 1.5      # EMA Cross: stop loss = 1.5 x ATR
-RR = 4.0               # take profit = 4 x risk (1:4)
+TP1_R = 3.0            # first target = 3 x risk (1:3): close half, move stop to break-even
+TP2_R = 4.0            # second target = 4 x risk (1:4): the rest of the trade
+BRAND = "PIPPULSE"     # name shown at the top of every signal
+CHANNEL_LINK = ""      # e.g. "https://t.me/yourchannel" -- leave empty to hide the link line
 EXPIRE_HOURS = 240     # close a trade as "expired" after this long (10 days)
 
 # --- learning layer ---
@@ -56,7 +62,7 @@ BACKTEST_BARS = 5000   # candles to replay (about 7 months of forex H1)
 CUT_BELOW_R = -5.0     # REMOVE a combination if its backtest total is this bad (in R) ...
 CUT_MIN_TRADES = 10    # ... and the backtest had at least this many trades
 
-SWEEP_RRS = [1.5, 2.0, 3.0, 4.0]                      # reward:risk values the --sweep test compares
+SWEEP_TARGETS = [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (3.0, 5.0)]   # (TP1, TP2) pairs the --sweep test compares
 SWEEP_FILTERS = ["none", "ema200", "ema200+slope"]    # trend filters the --sweep test compares
 TREND_EMA = 200
 SWEEP_FILE = Path("state/sweep.txt")
@@ -65,6 +71,20 @@ DERIV_URLS = [  # tried in order; the first one that answers is used
     "wss://api.derivws.com/trading/v1/options/ws/public",  # current public endpoint
     "wss://ws.derivws.com/websockets/v3?app_id=1089",      # older endpoint (fallback)
 ]
+
+# --- news posts ---
+NEWS = True                    # False = signals only
+NEWS_FILE = Path("state/news.json")
+CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+FEEDS = [
+    ("FXStreet", "https://www.fxstreet.com/rss/news"),
+    ("ForexLive", "https://www.forexlive.com/feed/news"),
+]
+NEWS_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD"}
+BRIEF_HOUR_UTC = 6             # morning brief goes out at the first run after 06:00 UTC (07:00 Nigeria)
+ALERT_MINUTES = 90             # warn about high-impact releases up to this long before they happen
+HEADLINES_PER_RUN = 2
+HEADLINES_PER_DAY = 6
 STATE_FILE = Path("state/signals.json")
 BACKTEST_FILE = Path("state/backtest.json")
 # -----------------------------------------------------
@@ -238,7 +258,9 @@ def unit_label(inst):
 
 def build_signal(inst, strategy, side, entry, sl, candle_time):
     risk = abs(entry - sl)
-    tp = entry + RR * risk if side == "BUY" else entry - RR * risk
+    sign = 1 if side == "BUY" else -1
+    tp1 = entry + sign * TP1_R * risk
+    tp2 = entry + sign * TP2_R * risk
     d = decimals(inst)
     return {
         "pair": inst["name"],
@@ -246,7 +268,10 @@ def build_signal(inst, strategy, side, entry, sl, candle_time):
         "side": side,
         "entry": round(entry, d),
         "sl": round(sl, d),
-        "tp": round(tp, d),
+        "tp1": round(tp1, d),
+        "tp2": round(tp2, d),
+        "tp1_r": TP1_R,
+        "tp2_r": TP2_R,
         "risk_pips": round(risk / unit_size(inst), 1),
         "unit": unit_label(inst),
         "candle": candle_time.isoformat(),
@@ -321,26 +346,65 @@ def strategy_price_action(inst, df):
 STRATEGY_FUNCS = {"EMA Cross": strategy_ema_cross, "Price Action": strategy_price_action}
 
 
-def format_signal(s):
+def format_signal(s, winrate_line):
     icon = "🟢" if s["side"] == "BUY" else "🔴"
-    return (
-        f"{icon} <b>{s['side']} {s['pair']}</b> (H1)\n"
-        f"Strategy: {s['strategy']}\n\n"
-        f"Entry: <code>{s['entry']}</code>\n"
-        f"Stop loss: <code>{s['sl']}</code> ({s['risk_pips']} {s.get('unit', 'pips')})\n"
-        f"Take profit: <code>{s['tp']}</code> (1:{RR:g})\n\n"
-        f"⚠️ Risk 1% or less per trade. Not financial advice."
+    arrow = "📈" if s["side"] == "BUY" else "📉"
+    synthetic = s.get("unit") == "pts"
+    kind = "SYNTHETIC" if synthetic else "FOREX"
+    name = s["pair"] + (" Index" if synthetic else "")
+    text = (
+        f"{icon} <b>{BRAND} VIP SIGNAL</b>  ·  {kind}\n\n"
+        f"<b>Pair:</b> {name}\n"
+        f"<b>Direction:</b> {arrow} {s['side']}\n"
+        f"<b>Strategy:</b> {s['strategy']}\n\n"
+        f"<b>Entry:</b> <code>{s['entry']}</code>\n"
+        f"<b>Stop Loss:</b> <code>{s['sl']}</code> ({s['risk_pips']} {s.get('unit', 'pips')})\n"
+        f"<b>TP1 (1:{s.get('tp1_r', TP1_R):g}):</b> <code>{s['tp1']}</code>\n"
+        f"<b>TP2 (1:{s.get('tp2_r', TP2_R):g}):</b> <code>{s['tp2']}</code>\n\n"
+        f"<b>Risk:</b> 1% max per trade\n"
+        f"{winrate_line}\n\n"
+        f"💡 At TP1 close half and move your stop to entry.\n"
+        f"⚠️ Trade at your own risk. Manage your position size. Past performance does not guarantee future results."
     )
+    if CHANNEL_LINK:
+        text += f"\n\n🔗 <a href=\"{CHANNEL_LINK}\">{BRAND.title()} VIP</a>"
+    return text
 
 
 # ---------- Result tracking ----------
+SCORED = ("TP", "TP1", "TP2", "SL")   # "TP" = trades saved by the old single-target version
+WINS = ("TP", "TP1", "TP2")
+
+
+def trade_r(result, tp1_r, tp2_r):
+    """Half the trade closes at TP1, the stop then moves to entry, the other half runs to TP2."""
+    if result == "SL":
+        return -1.0
+    if result == "TP1":   # TP1 hit, rest stopped at break-even
+        return 0.5 * tp1_r
+    if result == "TP2":
+        return 0.5 * tp1_r + 0.5 * tp2_r
+    return 0.0
+
+
 def record(trades):
-    scored = [t for t in trades if t["result"] in ("TP", "SL")]
-    wins = sum(1 for t in scored if t["result"] == "TP")
+    scored = [t for t in trades if t["result"] in SCORED]
+    wins = sum(1 for t in scored if t["result"] in WINS)
     total_r = sum(t["r"] for t in trades)
     n = len(scored)
     rate = (wins / n * 100) if n else 0
     return wins, n - wins, rate, total_r
+
+
+def winrate_30d_line(state):
+    """Real win rate of the signals posted to the channel in the last 30 days."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    recent = [t for t in state["closed"]
+              if t.get("live", True) and t["result"] in SCORED and t.get("closed_at", "") >= cutoff]
+    w, l, rate, r = record(recent)
+    if w + l < 10:
+        return f"<b>Win Rate (30d):</b> building record ({w + l} closed so far)"
+    return f"<b>Win Rate (30d):</b> {rate:.0f}% ({w}W / {l}L, {r:+.1f}R)"
 
 
 def stats_line(state, strategy):
@@ -354,18 +418,27 @@ def stats_line(state, strategy):
     )
 
 
-def walk_trade(side, sl, tp, highs, lows):
-    """Return (result, index) for the first candle that hits SL or TP, else (None, None)."""
+def walk_trade(side, entry, sl, tp1, tp2, highs, lows):
+    """Walk candles forward. Returns (result, index, tp1_hit).
+    result: "SL", "TP1" (TP1 hit, rest stopped at break-even), "TP2", or None (still open).
+    When one candle could have hit both the stop and a target, the stop is counted (conservative)."""
+    buy = side == "BUY"
+    stage = 0
     for j in range(len(highs)):
-        if side == "BUY":
-            hit_sl, hit_tp = lows[j] <= sl, highs[j] >= tp
+        h, l = highs[j], lows[j]
+        if stage == 0:
+            if (l <= sl) if buy else (h >= sl):
+                return "SL", j, False
+            if (h >= tp1) if buy else (l <= tp1):
+                stage = 1
+                if (h >= tp2) if buy else (l <= tp2):
+                    return "TP2", j, True
         else:
-            hit_sl, hit_tp = highs[j] >= sl, lows[j] <= tp
-        if hit_sl:  # if both hit in one candle, count the loss (conservative)
-            return "SL", j
-        if hit_tp:
-            return "TP", j
-    return None, None
+            if (l <= entry) if buy else (h >= entry):
+                return "TP1", j, True
+            if (h >= tp2) if buy else (l <= tp2):
+                return "TP2", j, True
+    return None, None, stage == 1
 
 
 def resolve_open(state, candles):
@@ -377,25 +450,41 @@ def resolve_open(state, candles):
             still_open.append(t)
             continue
 
+        tp1 = t.get("tp1", t.get("tp"))   # old trades only have a single "tp"
+        tp2 = t.get("tp2", t.get("tp"))
+        a, b = t.get("tp1_r", 4.0), t.get("tp2_r", 4.0)
         after = df[df["datetime"] > pd.Timestamp(t["candle"])]
-        result, _ = walk_trade(t["side"], t["sl"], t["tp"], after["high"].values, after["low"].values)
+        result, _, tp1_hit = walk_trade(t["side"], t["entry"], t["sl"], tp1, tp2,
+                                        after["high"].values, after["low"].values)
 
         if result is None:
             opened = datetime.fromisoformat(t["opened_at"])
             if now - opened > timedelta(hours=EXPIRE_HOURS):
-                result = "EXPIRED"
+                result = "TP1" if tp1_hit else "EXPIRED"
 
         if result is None:
+            if tp1_hit and not t.get("tp1_notified"):
+                t["tp1_notified"] = True
+                if t.get("live", True):
+                    send(
+                        f"🎯 <b>TP1 hit:</b> {t['side']} {t['pair']} ({t['strategy']})\n"
+                        f"Close half and move your stop to entry. The rest runs to TP2."
+                    )
             still_open.append(t)
             continue
 
         t["result"] = result
-        t["r"] = RR if result == "TP" else (-1.0 if result == "SL" else 0.0)
+        t["r"] = trade_r(result, a, b)
         t["closed_at"] = now.isoformat()
         state["closed"].append(t)
 
         if t.get("live", True):  # shadow trades never message the channel
-            label = {"TP": "✅ TP hit", "SL": "❌ SL hit", "EXPIRED": "⏱ Expired"}[result]
+            label = {
+                "TP2": "✅ TP2 hit (full target)",
+                "TP1": "🟡 TP1 hit, rest stopped at break-even",
+                "SL": "❌ SL hit",
+                "EXPIRED": "⏱ Expired",
+            }[result]
             send(
                 f"{label}: <b>{t['side']} {t['pair']}</b> ({t['strategy']})\n"
                 f"Result: {t['r']:+.1f}R\n\n{stats_line(state, t['strategy'])}"
@@ -408,7 +497,7 @@ def window_trades(state, key):
     """Last WINDOW finished (TP/SL) trades of one combination, live and shadow together."""
     done = [
         t for t in state["closed"]
-        if combo_key(t["strategy"], t["pair"]) == key and t["result"] in ("TP", "SL")
+        if combo_key(t["strategy"], t["pair"]) == key and t["result"] in SCORED
     ]
     done.sort(key=lambda t: t.get("closed_at", ""))
     return done[-WINDOW:]
@@ -479,13 +568,14 @@ def simulate(inst, df):
             if not sig:
                 continue
             end = min(len(df), i + 1 + expire)
-            result, j = walk_trade(sig["side"], sig["sl"], sig["tp"], highs[i + 1:end], lows[i + 1:end])
+            result, j, tp1_hit = walk_trade(sig["side"], sig["entry"], sig["sl"], sig["tp1"], sig["tp2"],
+                                            highs[i + 1:end], lows[i + 1:end])
             if result is None:
                 if end - (i + 1) < expire:  # history ended before the trade could finish
                     continue
-                result, j = "EXPIRED", expire - 1
+                result, j = ("TP1" if tp1_hit else "EXPIRED"), expire - 1
             busy_until = i + 1 + j
-            r = RR if result == "TP" else (-1.0 if result == "SL" else 0.0)
+            r = trade_r(result, TP1_R, TP2_R)
             trades.append({"strategy": strategy, "pair": inst["name"], "i": i, "result": result, "r": r})
     return trades
 
@@ -571,7 +661,7 @@ def run_sweep():
         sys.exit(1)
 
     expire = max(1, EXPIRE_HOURS * 3600 // CANDLE_SECONDS)
-    rows = {}  # (kind, strategy, filter, rr) -> list of (is_early, r, won)
+    rows = {}  # (kind, strategy, filter, (tp1, tp2)) -> list of (is_early, r, won)
     for inst, df in data:
         highs, lows, closes = df["high"].values, df["low"].values, df["close"].values
         ema = df["close"].ewm(span=TREND_EMA, adjust=False).mean().values
@@ -587,8 +677,9 @@ def run_sweep():
             for filt in SWEEP_FILTERS:
                 kept = [(i, sg) for i, sg in cands
                         if trend_ok(filt, sg["side"], closes[i], ema[i], ema[i - 10])]
-                for rr in SWEEP_RRS:
-                    out = rows.setdefault((inst["kind"], strategy, filt, rr), [])
+                for tgt in SWEEP_TARGETS:
+                    a, b = tgt
+                    out = rows.setdefault((inst["kind"], strategy, filt, tgt), [])
                     busy = -1
                     for i, sg in kept:
                         if i <= busy:
@@ -596,47 +687,189 @@ def run_sweep():
                         risk = abs(sg["entry"] - sg["sl"])
                         if risk <= 0:
                             continue
-                        tp = sg["entry"] + rr * risk if sg["side"] == "BUY" else sg["entry"] - rr * risk
+                        sign = 1 if sg["side"] == "BUY" else -1
+                        tp1, tp2 = sg["entry"] + sign * a * risk, sg["entry"] + sign * b * risk
                         end = min(len(df), i + 1 + expire)
-                        result, j = walk_trade(sg["side"], sg["sl"], tp, highs[i + 1:end], lows[i + 1:end])
+                        result, j, tp1_hit = walk_trade(sg["side"], sg["entry"], sg["sl"], tp1, tp2,
+                                                        highs[i + 1:end], lows[i + 1:end])
                         if result is None:
                             if end - (i + 1) < expire:
                                 continue
-                            result, j = "EXPIRED", expire - 1
+                            result, j = ("TP1" if tp1_hit else "EXPIRED"), expire - 1
                         busy = i + 1 + j
-                        r = rr if result == "TP" else (-1.0 if result == "SL" else 0.0)
-                        out.append((i < split, r, result == "TP"))
+                        r = trade_r(result, a, b)
+                        out.append((i < split, r, r > 0))
         print(f"{inst['name']}: swept {len(df)} candles")
 
     lines = ["==== SWEEP (R = multiples of the amount risked) ===="]
-    lines.append("Each row pools every instrument of that type. 'good' = positive in BOTH the early 70% and the late 30%.")
+    lines.append("Half closes at TP1, stop moves to entry, rest runs to TP2. Each row pools every instrument of that type.")
+    lines.append("'good' = positive in BOTH the early 70% and the late 30% of history, with 30+ trades.")
     for kind in ("forex", "synthetic"):
         for strategy in STRATEGIES:
             lines.append("")
             lines.append(f"-- {kind.upper()} / {strategy} --")
-            lines.append(f"{'filter':13s} {'R:R':>4s} {'trades':>6s} {'win%':>5s} {'need%':>5s} {'total R':>8s} {'R/trade':>8s} {'early R':>8s} {'late R':>8s}")
+            lines.append(f"{'filter':13s} {'TP1/TP2':>8s} {'trades':>6s} {'win%':>5s} {'total R':>8s} {'R/trade':>8s} {'early R':>8s} {'late R':>8s}")
             for filt in SWEEP_FILTERS:
-                for rr in SWEEP_RRS:
-                    t = rows.get((kind, strategy, filt, rr), [])
-                    n = sum(1 for x in t if x[1] != 0)
+                for tgt in SWEEP_TARGETS:
+                    t = rows.get((kind, strategy, filt, tgt), [])
                     if not t:
                         continue
+                    n = len(t)
                     wins = sum(1 for x in t if x[2])
                     total = sum(x[1] for x in t)
                     early = sum(x[1] for x in t if x[0])
                     late = sum(x[1] for x in t if not x[0])
                     good = "  good" if early > 0 and late > 0 and n >= 30 else ""
                     lines.append(
-                        f"{filt:13s} {rr:4.1f} {n:6d} {100 * wins / max(n, 1):5.0f} {100 / (1 + rr):5.0f} "
-                        f"{total:+8.1f} {total / len(t):+8.2f} {early:+8.1f} {late:+8.1f}{good}"
+                        f"{filt:13s} {tgt[0]:g}/{tgt[1]:g}".rjust(0).ljust(22)
+                        + f" {n:6d} {100 * wins / n:5.0f} {total:+8.1f} {total / n:+8.2f} {early:+8.1f} {late:+8.1f}{good}"
                     )
     lines.append("")
-    lines.append("win% must beat need% (the break-even rate) before costs. Spreads and slippage are NOT included.")
-    lines.append("Many variants were tried, so a lucky winner is likely. Trust only rows marked good with 30+ trades.")
+    lines.append("Spreads and slippage are NOT included. Many variants were tried, so a lucky winner is likely.")
+    lines.append("Trust only rows marked good, and only when neighbouring rows look similar.")
     text = "\n".join(lines)
     print(text)
     SWEEP_FILE.parent.mkdir(parents=True, exist_ok=True)
     SWEEP_FILE.write_text(text + "\n")
+
+
+# ---------- News posts ----------
+FLAGS = {"USD": "🇺🇸", "EUR": "🇪🇺", "GBP": "🇬🇧", "JPY": "🇯🇵", "AUD": "🇦🇺", "CAD": "🇨🇦"}
+WAT = timezone(timedelta(hours=1))   # Nigeria time
+HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; pippulse-bot)"}
+
+
+def load_news():
+    try:
+        news = json.loads(NEWS_FILE.read_text())
+    except Exception:
+        news = {}
+    news.setdefault("brief_date", "")
+    news.setdefault("alerted", [])
+    news.setdefault("seen", [])
+    news.setdefault("day", "")
+    news.setdefault("day_count", 0)
+    return news
+
+
+def save_news(news):
+    NEWS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    news["alerted"] = news["alerted"][-200:]
+    news["seen"] = news["seen"][-500:]
+    NEWS_FILE.write_text(json.dumps(news, indent=2))
+
+
+def fetch_calendar():
+    """High-impact releases for the major currencies this week, times in UTC."""
+    r = requests.get(CALENDAR_URL, headers=HTTP_HEADERS, timeout=20)
+    r.raise_for_status()
+    events = []
+    for e in r.json():
+        if e.get("impact") != "High" or e.get("country") not in NEWS_CURRENCIES:
+            continue
+        when = datetime.fromisoformat(e["date"]).astimezone(timezone.utc)
+        events.append({
+            "id": f"{e['date']}|{e['country']}|{e['title']}",
+            "time": when, "ccy": e["country"], "title": e["title"],
+            "forecast": e.get("forecast") or "", "previous": e.get("previous") or "",
+        })
+    return sorted(events, key=lambda x: x["time"])
+
+
+def event_line(e):
+    extra = []
+    if e["forecast"]:
+        extra.append(f"forecast {e['forecast']}")
+    if e["previous"]:
+        extra.append(f"previous {e['previous']}")
+    tail = f" ({', '.join(extra)})" if extra else ""
+    flag = FLAGS.get(e["ccy"], "")
+    return f"• {e['time'].astimezone(WAT):%H:%M} {flag} {e['ccy']} {html.escape(e['title'])}{html.escape(tail)}"
+
+
+def fetch_headlines():
+    """Newest headlines from the free RSS feeds. Headline + link only."""
+    per_feed = []
+    for name, url in FEEDS:
+        items = []
+        try:
+            r = requests.get(url, headers=HTTP_HEADERS, timeout=20)
+            r.raise_for_status()
+            for item in ET.fromstring(r.content).iter("item"):
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                if title and link:
+                    items.append({"source": name, "title": title, "link": link})
+        except Exception as e:
+            print(f"News feed {name} unavailable: {str(e)[:100]}")
+        per_feed.append(items[:15])
+    mixed = []  # interleave so one feed does not dominate
+    for k in range(15):
+        for items in per_feed:
+            if k < len(items):
+                mixed.append(items[k])
+    return mixed
+
+
+def run_news(force=False):
+    news = load_news()
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+
+    # 1) calendar: morning brief + "big news soon" warnings
+    try:
+        events = fetch_calendar()
+    except Exception as e:
+        events = None
+        print(f"Calendar unavailable: {str(e)[:100]}")
+    if events is not None:
+        todays = [e for e in events if e["time"].strftime("%Y-%m-%d") == today]
+        brief_due = force or (now.weekday() < 5 and BRIEF_HOUR_UTC <= now.hour < 20)
+        if brief_due and news["brief_date"] != today:
+            lines = [f"🗞 <b>{BRAND} MORNING BRIEF</b> · {now:%a %d %b}", ""]
+            if todays:
+                lines.append("High-impact releases today (Nigeria time):")
+                lines += [event_line(e) for e in todays]
+                lines += ["", "Prices can move fast around these. Be careful holding trades through them."]
+            else:
+                lines.append("No high-impact releases on the major currencies today. A quieter day.")
+            send("\n".join(lines))
+            news["brief_date"] = today
+        for e in events:
+            mins = (e["time"] - now).total_seconds() / 60
+            if 0 < mins <= ALERT_MINUTES and e["id"] not in news["alerted"]:
+                send(f"⚠️ <b>High-impact news in about {int(mins)} min</b>\n{event_line(e)}\n\n"
+                     f"Spreads can widen and price can jump. Consider staying out until it settles.")
+                news["alerted"].append(e["id"])
+
+    # 2) headlines (daytime only, capped so the channel is not spammed)
+    if news["day"] != today:
+        news["day"], news["day_count"] = today, 0
+    if force or 6 <= now.hour < 21:
+        items = fetch_headlines()
+        first_run = not news["seen"]
+        fresh = [h for h in items if h["link"] not in news["seen"]]
+        posted = 0
+        for h in fresh:
+            if posted >= HEADLINES_PER_RUN or news["day_count"] >= HEADLINES_PER_DAY:
+                break
+            send(f"📰 <b>Market news</b> ({h['source']})\n{html.escape(h['title'])}\n{h['link']}")
+            posted += 1
+            news["day_count"] += 1
+        # remember everything we saw, so an old backlog never drips out later
+        news["seen"] += [h["link"] for h in fresh]
+        if first_run:
+            print(f"News: first run, posted {posted} headline(s) and marked the rest as seen.")
+    save_news(news)
+
+
+def run_news_safe(force=False):
+    if not NEWS:
+        return
+    try:
+        run_news(force)
+    except Exception as e:  # news must never stop the signals
+        print(f"News step failed: {str(e)[:150]}")
 
 
 # ---------- Main ----------
@@ -651,6 +884,12 @@ def main():
     if "--sweep" in sys.argv:
         run_sweep()
         return
+    if "--news" in sys.argv:
+        run_news_safe(force=True)
+        print("News step done.")
+        return
+
+    run_news_safe()
 
     now = datetime.now(timezone.utc)
     weekend = now.weekday() >= 5
@@ -709,7 +948,7 @@ def main():
             if sig and state["last_signal"].get(key) != sig["candle"]:
                 sig["live"] = combo_active(state, key, backtest)
                 if sig["live"]:
-                    send(format_signal(sig))
+                    send(format_signal(sig, winrate_30d_line(state)))
                 else:
                     print(f"Shadow trade (paused, not posted): {key} {sig['side']} @ {sig['entry']}")
                 state["open"].append(sig)
