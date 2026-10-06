@@ -13,6 +13,10 @@ on:
         description: "Only post the news items (brief, alerts, headlines)"
         type: boolean
         default: false
+      repost:
+        description: "TEST: post news again even if already posted today (may duplicate)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -39,7 +43,7 @@ jobs:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python signal_bot.py ${{ inputs.test && '--test' || (inputs.news_only && '--news' || '') }}
+        run: python signal_bot.py ${{ inputs.test && '--test' || (inputs.repost && '--news-repost' || (inputs.news_only && '--news' || '')) }}
 
       - name: Save results
         run: |
