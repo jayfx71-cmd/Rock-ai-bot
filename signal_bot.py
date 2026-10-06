@@ -1760,7 +1760,11 @@ def lab_ny_breakout(d):
     return out
 
 
-def lab_daily_break(d, live=False):
+DAILY_END_MIN = 960   # Daily Break entries are allowed until this minute of the UTC day (960 = 16:00 UTC = 17:00 Nigeria)
+
+
+def lab_daily_break(d, live=False, end_min=None):
+    end_min = end_min or DAILY_END_MIN
     out = []
     days = sorted(lab_day_groups(d).items())
     prev = None
@@ -1770,7 +1774,7 @@ def lab_daily_break(d, live=False):
             for i in idx:
                 if i >= d["n"] - 1 and not live:
                     break
-                if not (420 <= d["mod"][i] <= 960):
+                if not (420 <= d["mod"][i] <= end_min):
                     continue
                 c, ah = d["c"][i], d["atr_h"][i]
                 if not ah > 0:
@@ -2183,6 +2187,59 @@ def run_test_chart():
     print("Test chart sent.")
 
 
+# ---------- Widening test: more pairs and a longer window for Daily Break ----------
+WIDEN_FILE = Path("state/widen.txt")
+WIDEN_ENDS = [(960, "until 17:00 Nigeria time (today)"), (1200, "until 21:00 Nigeria time")]
+
+
+def run_widen():
+    results = {}   # (end_min, pair) -> trades
+    days = {}      # pair -> number of trading days in the data
+    for inst in INSTRUMENTS:
+        if inst["kind"] != "forex":
+            continue
+        try:
+            time.sleep(8)
+            df = fetch_tf(inst["symbol"], 30, TF_PAGES[30])
+        except Exception as e:
+            print(f"Could not fetch {inst['name']}: {str(e)[:150]}")
+            continue
+        d = lab_prepare(df, 30)
+        days[inst["name"]] = max(1, len(lab_day_groups(d)))
+        for end_min, _ in WIDEN_ENDS:
+            cands = lab_daily_break(d, end_min=end_min)
+            results[(end_min, inst["name"])] = lab_evaluate(inst, d, cands, 30, 1.0, 2.0)
+        print(f"{inst['name']}: {len(df)} candles, {days[inst['name']]} days")
+    lines = ["==== WIDEN TEST: Daily Break, 30-minute entries, TP1 1:1 / TP2 1:2, after spreads ====",
+             "'sig/day' = average signals per day on that pair. 'good' = t of 3+, positive early AND late, 30+ trades."]
+    for end_min, label in WIDEN_ENDS:
+        lines += ["", f"-- Window: {label} --",
+                  f"{'pair':8s} {'trades':>6s} {'sig/day':>7s} {'win%':>5s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
+        pooled, per_day = [], 0.0
+        for name in sorted(days):
+            t = results.get((end_min, name), [])
+            if not t:
+                continue
+            n = len(t)
+            pooled += t
+            per_day += n / days[name]
+            early, late = sum(x[1] for x in t if x[0]), sum(x[1] for x in t if not x[0])
+            ts = t_score([x[1] for x in t])
+            good = "  good" if early > 0 and late > 0 and n >= 30 and ts >= 3 else ""
+            lines.append(f"{name:8s} {n:6d} {n / days[name]:7.2f} {100 * sum(1 for x in t if x[2]) / n:5.0f} "
+                         f"{sum(x[1] for x in t) / n:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{good}")
+        if pooled:
+            n = len(pooled)
+            early, late = sum(x[1] for x in pooled if x[0]), sum(x[1] for x in pooled if not x[0])
+            lines.append(f"{'ALL':8s} {n:6d} {per_day:7.2f} {100 * sum(1 for x in pooled if x[2]) / n:5.0f} "
+                         f"{sum(x[1] for x in pooled) / n:+8.2f} {t_score([x[1] for x in pooled]):5.1f} {early:+8.1f} {late:+8.1f}")
+    lines += ["", "More pairs mean more signals, but only add a pair if it holds up on its own (positive early and late)."]
+    text = "\n".join(lines)
+    print(text)
+    WIDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    WIDEN_FILE.write_text(text + "\n")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -2194,6 +2251,9 @@ def main():
         return
     if "--sweep" in sys.argv:
         run_sweep()
+        return
+    if "--widen" in sys.argv:
+        run_widen()
         return
     if "--test-chart" in sys.argv:
         run_test_chart()
