@@ -12,19 +12,6 @@
       "candle": "2026-10-05T10:00:00",
       "opened_at": "2026-10-05T11:24:45.179217+00:00",
       "live": true
-    },
-    {
-      "pair": "USD/JPY",
-      "strategy": "Price Action",
-      "side": "BUY",
-      "entry": 158.248,
-      "sl": 157.811,
-      "tp": 159.994,
-      "risk_pips": 43.7,
-      "unit": "pips",
-      "candle": "2026-10-05T11:00:00",
-      "opened_at": "2026-10-05T12:30:54.035101+00:00",
-      "live": false
     }
   ],
   "closed": [
@@ -91,6 +78,22 @@
       "result": "EXPIRED",
       "r": 0.0,
       "closed_at": "2026-10-06T01:21:01.486913+00:00"
+    },
+    {
+      "pair": "USD/JPY",
+      "strategy": "Price Action",
+      "side": "BUY",
+      "entry": 158.248,
+      "sl": 157.811,
+      "tp": 159.994,
+      "risk_pips": 43.7,
+      "unit": "pips",
+      "candle": "2026-10-05T11:00:00",
+      "opened_at": "2026-10-05T12:30:54.035101+00:00",
+      "live": false,
+      "result": "SL",
+      "r": -1.0,
+      "closed_at": "2026-10-06T02:23:38.988723+00:00"
     }
   ],
   "last_signal": {
