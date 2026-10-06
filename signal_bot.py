@@ -44,10 +44,12 @@ SYNTHETICS_OFF = {
     "Volatility 90 (1s)": "1HZ90V",
 }
 
-STRATEGIES = ["London Breakout"]  # LIVE: these post to the channel (delete a name to switch it off)
-RESEARCH_STRATEGIES = ["EMA Cross", "Price Action", "Mean Reversion"]  # tested by --backtest/--sweep only; move a
+STRATEGIES = ["Daily Break"]  # LIVE: these post to the channel (delete a name to switch it off)
+RESEARCH_STRATEGIES = ["London Breakout", "EMA Cross", "Price Action", "Mean Reversion"]  # tested by --backtest/--sweep only; move a
                                                                        # name up into STRATEGIES once it proves itself
-STRATEGY_PAIRS = {"London Breakout": ["EUR/USD", "GBP/USD", "XAU/USD"]}  # live pairs per strategy (tests use all pairs)
+STRATEGY_PAIRS = {"Daily Break": ["EUR/USD", "GBP/USD", "XAU/USD"], "London Breakout": ["EUR/USD", "GBP/USD", "XAU/USD"]}
+LIVE_INTERVAL, LIVE_MINUTES, LIVE_COUNT = "30min", 30, 1200   # live signals use 30-minute candles (about 25 days of history)
+M30_ONLY = ["Daily Break"]   # built for 30-minute candles, so the hourly --backtest/--sweep skip it (see --lab)  # live pairs per strategy (tests use all pairs)
 LONDON_FILTER = True   # London Breakout only trades with the 200 EMA trend (price on that side AND the EMA sloping that way)
 TREND_EMA = 200
 COSTS = True           # backtest/sweep subtract the spread from every trade (as a fraction of the risk)
@@ -55,9 +57,9 @@ SPREADS = {            # typical spread in price units (round trip is paid once)
     "EUR/USD": 0.00010, "GBP/USD": 0.00015, "USD/JPY": 0.012, "AUD/USD": 0.00012,
     "USD/CAD": 0.00018, "GBP/JPY": 0.025, "XAU/USD": 0.35,
 }
-ALL_STRATEGIES = STRATEGIES + RESEARCH_STRATEGIES
-STRATEGY_KINDS = {"London Breakout": ("forex",), "Mean Reversion": ("forex",)}  # others run on everything
-STRATEGY_TARGETS = {"London Breakout": (1.0, 2.0), "Mean Reversion": (1.0, 1.5)}  # (TP1, TP2) in R; others use TP1_R/TP2_R
+ALL_STRATEGIES = [x for x in STRATEGIES + RESEARCH_STRATEGIES if x not in M30_ONLY]
+STRATEGY_KINDS = {"London Breakout": ("forex",), "Mean Reversion": ("forex",), "Daily Break": ("forex",)}  # others run on everything
+STRATEGY_TARGETS = {"London Breakout": (1.0, 2.0), "Mean Reversion": (1.0, 1.5), "Daily Break": (1.0, 2.0)}  # (TP1, TP2) in R; others use TP1_R/TP2_R
 BB_PERIOD = 20
 SESSION_START, SESSION_END = 7, 11   # London Breakout: signals only when the candle opens 07:00-11:00 UTC
 ASIA_RANGE_HOURS = 7                 # overnight range = candles opening 00:00-06:00 UTC
@@ -165,17 +167,17 @@ def combo_key(strategy, pair):
 
 
 # ---------- Data ----------
-def only_closed(df):
+def only_closed(df, seconds=None):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    return df[df["datetime"] + timedelta(seconds=CANDLE_SECONDS) <= now].reset_index(drop=True)
+    return df[df["datetime"] + timedelta(seconds=seconds or CANDLE_SECONDS) <= now].reset_index(drop=True)
 
 
-def fetch_twelvedata(symbol, count=CANDLE_COUNT):
+def fetch_twelvedata(symbol, count=CANDLE_COUNT, interval="1h", seconds=None):
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
             "symbol": symbol,
-            "interval": "1h",
+            "interval": interval,
             "outputsize": count,
             "timezone": "UTC",
             "apikey": TD_KEY,
@@ -190,7 +192,7 @@ def fetch_twelvedata(symbol, count=CANDLE_COUNT):
     for c in ["open", "high", "low", "close"]:
         df[c] = df[c].astype(float)
     df = df.sort_values("datetime").reset_index(drop=True)
-    return only_closed(df)
+    return only_closed(df, seconds)
 
 
 def deriv_request(url, symbol, count):
@@ -469,7 +471,21 @@ def strategy_mean_reversion(inst, df):
     return build_signal(inst, "Mean Reversion", side, entry, sl, last.datetime)
 
 
+def strategy_daily_break(inst, df):
+    """Live: first 30-minute close beyond yesterday's high/low (07:00-16:00 UTC), with the 200-hour trend."""
+    if len(df) < 450:
+        return None
+    minutes = max(1, int(round((df["datetime"].iloc[-1] - df["datetime"].iloc[-2]).total_seconds() / 60)))
+    d = lab_prepare(df.reset_index(drop=True), minutes)
+    cands = lab_daily_break(d, live=True)
+    if not cands or cands[-1][0] != d["n"] - 1:
+        return None
+    i, side, sl = cands[-1]
+    return build_signal(inst, "Daily Break", side, float(d["c"][i]), sl, df["datetime"].iloc[-1])
+
+
 STRATEGY_FUNCS = {
+    "Daily Break": strategy_daily_break,
     "EMA Cross": strategy_ema_cross,
     "Price Action": strategy_price_action,
     "London Breakout": strategy_london_breakout,
@@ -1479,7 +1495,7 @@ def lab_ny_breakout(d):
     return out
 
 
-def lab_daily_break(d):
+def lab_daily_break(d, live=False):
     out = []
     days = sorted(lab_day_groups(d).items())
     prev = None
@@ -1487,7 +1503,7 @@ def lab_daily_break(d):
         if prev is not None:
             hi, lo = d["h"][prev].max(), d["l"][prev].min()
             for i in idx:
-                if i >= d["n"] - 1:
+                if i >= d["n"] - 1 and not live:
                     break
                 if not (420 <= d["mod"][i] <= 960):
                     continue
@@ -1535,6 +1551,7 @@ def lab_evaluate(inst, d, cands, minutes, a, b):
 
 def run_lab():
     rows = {}   # (strategy, minutes, target) -> trades
+    by_pair = {}   # (strategy, minutes, pair) -> trades at the 1/2 target
     for inst in INSTRUMENTS:
         if inst["name"] not in TF_PAIRS:
             continue
@@ -1549,7 +1566,10 @@ def run_lab():
             for strat in LAB_STRATEGIES:
                 cands = LAB_FUNCS[strat](d)
                 for tgt in LAB_TARGETS:
-                    rows.setdefault((strat, minutes, tgt), []).extend(lab_evaluate(inst, d, cands, minutes, *tgt))
+                    res = lab_evaluate(inst, d, cands, minutes, *tgt)
+                    rows.setdefault((strat, minutes, tgt), []).extend(res)
+                    if tgt == (1.0, 2.0):
+                        by_pair[(strat, minutes, inst["name"])] = res
             print(f"{inst['name']} {minutes}m done ({len(df)} candles)")
     lines = ["==== STRATEGY LAB (after typical spreads, 3 pairs pooled) ====",
              "Half closes at TP1, stop to entry, rest runs to TP2. 'hrs' = average hours a trade stays open.",
@@ -1572,6 +1592,14 @@ def run_lab():
                 lines.append(f"{minutes:>4d}m {tgt[0]:g}/{tgt[1]:g}".ljust(15)
                              + f"{n:6d} {100 * sum(1 for x in t if x[2]) / n:5.0f} {tot / n:+8.2f} {ts:5.1f} "
                              f"{early:+8.1f} {late:+8.1f} {sum(x[3] for x in t) / n:5.1f}{good}")
+    lines += ["", "-- PER PAIR (TP1/TP2 1/2): is one pair carrying the result? --",
+              f"{'strategy':15s} {'entry':>5s} {'pair':8s} {'trades':>6s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
+    for (strat, minutes, pair), t in sorted(by_pair.items()):
+        if strat != "Daily Break" or not t:
+            continue
+        n = len(t)
+        lines.append(f"{strat:15s} {minutes:>4d}m {pair:8s} {n:6d} {sum(x[1] for x in t) / n:+8.2f} "
+                     f"{t_score([x[1] for x in t]):5.1f} {sum(x[1] for x in t if x[0]):+8.1f} {sum(x[1] for x in t if not x[0]):+8.1f}")
     text = "\n".join(lines)
     print(text)
     LAB_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1635,7 +1663,7 @@ def main():
                 if not first_forex:
                     time.sleep(8)  # stay under the free-tier rate limit
                 first_forex = False
-                df = fetch_twelvedata(inst["symbol"])
+                df = fetch_twelvedata(inst["symbol"], LIVE_COUNT, LIVE_INTERVAL, LIVE_MINUTES * 60)
             else:
                 df = fetch_deriv(inst["symbol"])
             candles[inst["name"]] = add_indicators(df)
