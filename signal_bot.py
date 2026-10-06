@@ -1,6 +1,7 @@
 """
 Free automated signal bot (Forex + Deriv synthetic indices) with a learning layer.
-Strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
+Live strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
+Research strategies (backtest/sweep only until proven): London Breakout and Mean Reversion.
 ATR-based stop loss, two targets (TP1 1:3, TP2 1:4). Runs on a schedule via GitHub Actions,
 posts to a Telegram channel, and tracks TP/SL results per strategy in state/signals.json.
 
@@ -10,6 +11,8 @@ logging silent "shadow" trades, so it can switch itself back on if it recovers.
 Run `python signal_bot.py --backtest` to replay history and seed that learning.
 Run `python signal_bot.py --sweep` to compare target sizes and trend filters.
 Run `python signal_bot.py --news` to post only the news items (brief, alerts, headlines).
+Run `python signal_bot.py --nfp` to test how price reacts after past Non-Farm Payrolls releases.
+News filter: normal signals pause on the pairs involved around every high-impact release.
 """
 import html
 import json
@@ -17,6 +20,7 @@ import os
 import sys
 import time
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,10 +28,12 @@ import pandas as pd
 import requests
 
 # ---------------- CONFIG (edit these) ----------------
-FOREX = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "GBP/JPY"]
+FOREX = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "GBP/JPY", "XAU/USD"]  # XAU/USD = gold
 
-# Deriv synthetic indices: display name -> Deriv symbol code (trade 24/7)
-SYNTHETICS = {
+# Deriv synthetic indices are switched OFF (random-number markets: no strategy can have an edge there).
+# To bring them back, move the entries from SYNTHETICS_OFF into SYNTHETICS.
+SYNTHETICS = {}
+SYNTHETICS_OFF = {
     "Volatility 75": "R_75",
     "Volatility 75 (1s)": "1HZ75V",
     "Volatility 25": "R_25",
@@ -37,7 +43,15 @@ SYNTHETICS = {
     "Volatility 90 (1s)": "1HZ90V",
 }
 
-STRATEGIES = ["EMA Cross", "Price Action"]  # delete a name here to switch that strategy off
+STRATEGIES = ["EMA Cross", "Price Action"]  # LIVE: these post to the channel (delete a name to switch it off)
+RESEARCH_STRATEGIES = ["London Breakout", "Mean Reversion"]  # tested by --backtest/--sweep only; move a name
+                                                              # up into STRATEGIES once the sweep shows it works
+ALL_STRATEGIES = STRATEGIES + RESEARCH_STRATEGIES
+STRATEGY_KINDS = {"London Breakout": ("forex",), "Mean Reversion": ("forex",)}  # others run on everything
+STRATEGY_TARGETS = {"London Breakout": (1.0, 2.0), "Mean Reversion": (1.0, 1.5)}  # (TP1, TP2) in R; others use TP1_R/TP2_R
+BB_PERIOD = 20
+SESSION_START, SESSION_END = 7, 11   # London Breakout: signals only when the candle opens 07:00-11:00 UTC
+ASIA_RANGE_HOURS = 7                 # overnight range = candles opening 00:00-06:00 UTC
 
 CANDLE_SECONDS = 3600  # H1 candles
 CANDLE_COUNT = 250
@@ -62,7 +76,7 @@ BACKTEST_BARS = 5000   # candles to replay (about 7 months of forex H1)
 CUT_BELOW_R = -5.0     # REMOVE a combination if its backtest total is this bad (in R) ...
 CUT_MIN_TRADES = 10    # ... and the backtest had at least this many trades
 
-SWEEP_TARGETS = [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (3.0, 5.0)]   # (TP1, TP2) pairs the --sweep test compares
+SWEEP_TARGETS = [(1.0, 1.5), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (3.0, 5.0)]   # (TP1, TP2) pairs the --sweep test compares
 SWEEP_FILTERS = ["none", "ema200", "ema200+slope"]    # trend filters the --sweep test compares
 TREND_EMA = 200
 SWEEP_FILE = Path("state/sweep.txt")
@@ -83,6 +97,11 @@ FEEDS = [
 NEWS_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD"}
 BRIEF_HOUR_UTC = 6             # morning brief goes out at the first run after 06:00 UTC (07:00 Nigeria)
 ALERT_MINUTES = 90             # warn about high-impact releases up to this long before they happen
+BLACKOUT_BEFORE_MIN = 30       # no new signals from this long before a high-impact release ...
+BLACKOUT_AFTER_MIN = 90        # ... until this long after it, on the pairs that release affects
+NFP_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD"]   # pairs used by the --nfp test
+NFP_PAGES = 7                  # pages of 5000 H1 candles to fetch for the --nfp test (about 5 years)
+NFP_FILE = Path("state/nfp.txt")
 HEADLINES_PER_RUN = 2
 HEADLINES_PER_DAY = 6
 STATE_FILE = Path("state/signals.json")
@@ -236,6 +255,10 @@ def add_indicators(df):
         axis=1,
     ).max(axis=1)
     df["atr"] = tr.ewm(alpha=1 / ATR_PERIOD, adjust=False).mean()
+
+    mid = df["close"].rolling(BB_PERIOD).mean()
+    sd = df["close"].rolling(BB_PERIOD).std(ddof=0)
+    df["bb_up"], df["bb_low"] = mid + 2 * sd, mid - 2 * sd
     return df
 
 
@@ -243,12 +266,16 @@ def add_indicators(df):
 def decimals(inst):
     if inst["kind"] == "synthetic":
         return 4
+    if "XAU" in inst["name"]:
+        return 2
     return 3 if "JPY" in inst["name"] else 5
 
 
 def unit_size(inst):
     if inst["kind"] == "synthetic":
         return 1.0
+    if "XAU" in inst["name"]:
+        return 0.1   # gold: 1 pip = 10 cents
     return 0.01 if "JPY" in inst["name"] else 0.0001
 
 
@@ -256,11 +283,16 @@ def unit_label(inst):
     return "pts" if inst["kind"] == "synthetic" else "pips"
 
 
+def strategy_applies(strategy, inst):
+    return inst["kind"] in STRATEGY_KINDS.get(strategy, ("forex", "synthetic"))
+
+
 def build_signal(inst, strategy, side, entry, sl, candle_time):
     risk = abs(entry - sl)
     sign = 1 if side == "BUY" else -1
-    tp1 = entry + sign * TP1_R * risk
-    tp2 = entry + sign * TP2_R * risk
+    r1, r2 = STRATEGY_TARGETS.get(strategy, (TP1_R, TP2_R))
+    tp1 = entry + sign * r1 * risk
+    tp2 = entry + sign * r2 * risk
     d = decimals(inst)
     return {
         "pair": inst["name"],
@@ -270,8 +302,8 @@ def build_signal(inst, strategy, side, entry, sl, candle_time):
         "sl": round(sl, d),
         "tp1": round(tp1, d),
         "tp2": round(tp2, d),
-        "tp1_r": TP1_R,
-        "tp2_r": TP2_R,
+        "tp1_r": r1,
+        "tp2_r": r2,
         "risk_pips": round(risk / unit_size(inst), 1),
         "unit": unit_label(inst),
         "candle": candle_time.isoformat(),
@@ -343,7 +375,75 @@ def strategy_price_action(inst, df):
     return build_signal(inst, "Price Action", side, entry, sl, last.datetime)
 
 
-STRATEGY_FUNCS = {"EMA Cross": strategy_ema_cross, "Price Action": strategy_price_action}
+# ---------- Strategy 3 (research): London Breakout ----------
+def strategy_london_breakout(inst, df):
+    """First candle close beyond the overnight (Asian) range once London opens. Stop at mid-range."""
+    if len(df) < 60:
+        return None
+    last = df.iloc[-1]
+    t = last.datetime
+    if not (SESSION_START <= t.hour <= SESSION_END):
+        return None
+    atr = float(last.atr)
+    if not atr > 0:
+        return None
+    recent = df.iloc[-40:]
+    today = recent[recent["datetime"].dt.date == t.date()]
+    asia = today[today["datetime"].dt.hour < SESSION_START]
+    if len(asia) < ASIA_RANGE_HOURS:   # incomplete night (data gap)
+        return None
+    hi, lo = float(asia["high"].max()), float(asia["low"].min())
+    if not (0.5 * atr <= hi - lo <= 4 * atr):   # range must be a sensible size
+        return None
+    earlier = today[(today["datetime"].dt.hour >= SESSION_START) & (today["datetime"] < t)]
+    if ((earlier["close"] > hi) | (earlier["close"] < lo)).any():   # already broke out today
+        return None
+
+    entry, mid = float(last.close), (hi + lo) / 2
+    if entry > hi:
+        side, sl = "BUY", mid - 0.1 * atr
+    elif entry < lo:
+        side, sl = "SELL", mid + 0.1 * atr
+    else:
+        return None
+    risk = abs(entry - sl)
+    if risk > 3 * atr:
+        return None
+    if risk < 0.5 * atr:
+        sl = entry - 0.5 * atr if side == "BUY" else entry + 0.5 * atr
+    return build_signal(inst, "London Breakout", side, entry, sl, t)
+
+
+# ---------- Strategy 4 (research): Mean reversion (Bollinger re-entry) ----------
+def strategy_mean_reversion(inst, df):
+    """Price closed outside the Bollinger band, then closes back inside: bet on a snap back."""
+    if len(df) < BB_PERIOD + 5:
+        return None
+    prev, last = df.iloc[-2], df.iloc[-1]
+    atr = float(last.atr)
+    if not atr > 0:
+        return None
+    entry = float(last.close)
+    if prev.close < prev.bb_low and last.close > last.bb_low and last.rsi < 45:
+        side, sl = "BUY", min(float(prev.low), float(last.low)) - 0.2 * atr
+    elif prev.close > prev.bb_up and last.close < last.bb_up and last.rsi > 55:
+        side, sl = "SELL", max(float(prev.high), float(last.high)) + 0.2 * atr
+    else:
+        return None
+    risk = abs(entry - sl)
+    if risk > 3 * atr:
+        return None
+    if risk < 0.5 * atr:
+        sl = entry - 0.5 * atr if side == "BUY" else entry + 0.5 * atr
+    return build_signal(inst, "Mean Reversion", side, entry, sl, last.datetime)
+
+
+STRATEGY_FUNCS = {
+    "EMA Cross": strategy_ema_cross,
+    "Price Action": strategy_price_action,
+    "London Breakout": strategy_london_breakout,
+    "Mean Reversion": strategy_mean_reversion,
+}
 
 
 def format_signal(s, winrate_line):
@@ -416,6 +516,16 @@ def stats_line(state, strategy):
         f"📊 {strategy}: {w}W / {l}L ({rate:.0f}%) | {r:+.1f}R\n"
         f"📊 All strategies: {aw}W / {al}L ({arate:.0f}%) | {ar:+.1f}R"
     )
+
+
+def t_score(values):
+    """How many standard errors the average result is away from zero (about 2.5+ is worth noticing)."""
+    n = len(values)
+    if n < 3:
+        return 0.0
+    mean = sum(values) / n
+    var = sum((v - mean) ** 2 for v in values) / (n - 1)
+    return mean / ((var / n) ** 0.5) if var > 0 else 0.0
 
 
 def walk_trade(side, entry, sl, tp1, tp2, highs, lows):
@@ -536,6 +646,8 @@ def combo_active(state, key, backtest):
 def print_leaderboard(state, backtest, cuts=frozenset()):
     keys = set(state["paused"]) | set(backtest)
     keys |= {combo_key(t["strategy"], t["pair"]) for t in state["open"] + state["closed"]}
+    names = {i["name"] for i in INSTRUMENTS}
+    keys = {k for k in keys if k.split("|")[0] in STRATEGIES and k.split("|", 1)[1] in names}  # live only
     if not keys:
         return
     print("---- LEARNING LEADERBOARD (strategy | pair) ----")
@@ -558,7 +670,9 @@ def simulate(inst, df):
     highs, lows = df["high"].values, df["low"].values
     expire = max(1, EXPIRE_HOURS * 3600 // CANDLE_SECONDS)
     trades = []
-    for strategy in STRATEGIES:
+    for strategy in ALL_STRATEGIES:
+        if not strategy_applies(strategy, inst):
+            continue
         func = STRATEGY_FUNCS[strategy]
         busy_until = -1
         for i in range(SLOW_EMA + 6, len(df) - 1):
@@ -575,7 +689,7 @@ def simulate(inst, df):
                     continue
                 result, j = ("TP1" if tp1_hit else "EXPIRED"), expire - 1
             busy_until = i + 1 + j
-            r = trade_r(result, TP1_R, TP2_R)
+            r = trade_r(result, sig["tp1_r"], sig["tp2_r"])
             trades.append({"strategy": strategy, "pair": inst["name"], "i": i, "result": result, "r": r})
     return trades
 
@@ -625,10 +739,10 @@ def run_backtest():
     print(f"{'combination':38s} {'trades':>6s} {'win%':>5s} {'total R':>8s} {'first70% R':>11s} {'last30% R':>10s}")
     for key, v in sorted(result.items(), key=lambda kv: -kv[1]["r"]):
         print(f"{key:38s} {v['n']:6d} {v['win_rate']:5.0f} {v['r']:+8.1f} {v['first_70_r']:+11.1f} {v['last_30_r']:+10.1f}")
-    for strategy in STRATEGIES:
+    for strategy in ALL_STRATEGIES:
         mine = [t for t in all_trades if t["strategy"] == strategy]
         w, l, rate, r = record(mine)
-        print(f"ALL {strategy}: {w + l} trades, {rate:.0f}% win rate, {r:+.1f}R")
+        print(f"ALL {strategy}{'' if strategy in STRATEGIES else ' (research)'}: {w + l} trades, {rate:.0f}% win rate, {r:+.1f}R")
     print("Tip: a combination that wins in 'first70%' but loses in 'last30%' is probably luck.")
 
 
@@ -667,7 +781,9 @@ def run_sweep():
         ema = df["close"].ewm(span=TREND_EMA, adjust=False).mean().values
         split = int(len(df) * 0.7)
         start = TREND_EMA + 10
-        for strategy in STRATEGIES:
+        for strategy in ALL_STRATEGIES:
+            if not strategy_applies(strategy, inst):
+                continue
             func = STRATEGY_FUNCS[strategy]
             cands = []
             for i in range(start, len(df) - 1):
@@ -703,12 +819,17 @@ def run_sweep():
 
     lines = ["==== SWEEP (R = multiples of the amount risked) ===="]
     lines.append("Half closes at TP1, stop moves to entry, rest runs to TP2. Each row pools every instrument of that type.")
-    lines.append("'good' = positive in BOTH the early 70% and the late 30% of history, with 30+ trades.")
+    lines.append("'t' says how real a result is (under 2 = could easily be luck). 'good' needs t of 3+, positive in BOTH the")
+    lines.append("early 70% and the late 30% of history, and 30+ trades.")
     for kind in ("forex", "synthetic"):
-        for strategy in STRATEGIES:
+        for strategy in ALL_STRATEGIES:
+            if kind not in STRATEGY_KINDS.get(strategy, ("forex", "synthetic")):
+                continue
+            if not any(k[0] == kind and k[1] == strategy and v for k, v in rows.items()):
+                continue
             lines.append("")
-            lines.append(f"-- {kind.upper()} / {strategy} --")
-            lines.append(f"{'filter':13s} {'TP1/TP2':>8s} {'trades':>6s} {'win%':>5s} {'total R':>8s} {'R/trade':>8s} {'early R':>8s} {'late R':>8s}")
+            lines.append(f"-- {kind.upper()} / {strategy}{'' if strategy in STRATEGIES else ' (research)'} --")
+            lines.append(f"{'filter':13s} {'TP1/TP2':>8s} {'trades':>6s} {'win%':>5s} {'total R':>8s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}")
             for filt in SWEEP_FILTERS:
                 for tgt in SWEEP_TARGETS:
                     t = rows.get((kind, strategy, filt, tgt), [])
@@ -719,10 +840,11 @@ def run_sweep():
                     total = sum(x[1] for x in t)
                     early = sum(x[1] for x in t if x[0])
                     late = sum(x[1] for x in t if not x[0])
-                    good = "  good" if early > 0 and late > 0 and n >= 30 else ""
+                    ts = t_score([x[1] for x in t])
+                    good = "  good" if early > 0 and late > 0 and n >= 30 and ts >= 3 else ""
                     lines.append(
-                        f"{filt:13s} {tgt[0]:g}/{tgt[1]:g}".rjust(0).ljust(22)
-                        + f" {n:6d} {100 * wins / n:5.0f} {total:+8.1f} {total / n:+8.2f} {early:+8.1f} {late:+8.1f}{good}"
+                        f"{filt:13s} {tgt[0]:g}/{tgt[1]:g}".ljust(22)
+                        + f" {n:6d} {100 * wins / n:5.0f} {total:+8.1f} {total / n:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{good}"
                     )
     lines.append("")
     lines.append("Spreads and slippage are NOT included. Many variants were tried, so a lucky winner is likely.")
@@ -731,6 +853,141 @@ def run_sweep():
     print(text)
     SWEEP_FILE.parent.mkdir(parents=True, exist_ok=True)
     SWEEP_FILE.write_text(text + "\n")
+
+
+# ---------- NFP research: how does price behave after Non-Farm Payrolls? ----------
+def fetch_twelvedata_pages(symbol, pages):
+    """Fetch several pages of 5000 H1 candles going further back in time (slow: obeys the rate limit)."""
+    frames, end = [], None
+    for page in range(pages):
+        params = {"symbol": symbol, "interval": "1h", "outputsize": 5000, "timezone": "UTC", "apikey": TD_KEY}
+        if end:
+            params["end_date"] = end
+        data = requests.get("https://api.twelvedata.com/time_series", params=params, timeout=90).json()
+        if "values" not in data:
+            if page == 0:
+                raise RuntimeError(data.get("message", str(data)))
+            break
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        frames.append(df)
+        if len(df) < 100:
+            break
+        end = df["datetime"].min().strftime("%Y-%m-%d %H:%M:%S")
+        time.sleep(8)
+    df = pd.concat(frames).drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
+    for c in ["open", "high", "low", "close"]:
+        df[c] = df[c].astype(float)
+    return only_closed(df)
+
+
+def nfp_release_times(first, last):
+    """NFP comes out at 08:30 New York time on the 3rd Friday after the week containing the 12th,
+    moved around holidays (Jan 1-3 -> a week later, July 4th weekend -> the Thursday before)."""
+    ny, out = ZoneInfo("America/New_York"), []
+    year, month = first.year, first.month - 1      # start one month early: release comes the month after
+    if month == 0:
+        year, month = year - 1, 12
+    while (year, month) <= (last.year, last.month):
+        twelfth = datetime(year, month, 12)
+        ref_saturday = twelfth + timedelta(days=(5 - twelfth.weekday()) % 7)
+        day = ref_saturday + timedelta(days=20)
+        if day.month == 1 and day.day <= 3:
+            day += timedelta(days=7)
+        elif day.month == 7 and day.day in (3, 4):   # Jul 4 on a Friday, or the Friday off when Jul 4 is a Saturday
+            day -= timedelta(days=1)
+        release = datetime(day.year, day.month, day.day, 8, 30, tzinfo=ny).astimezone(timezone.utc)
+        if first <= release.replace(tzinfo=None) <= last:
+            out.append(release)
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return out
+
+
+def run_nfp():
+    NFP_TARGETS = [(1.0, 1.5), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0)]
+    horizon = 24                       # follow each trade for up to 24 hours
+    trades = {}                        # (rule, target) -> list of (event_order, r, win)
+    used, per_pair = 0, {}
+    for k, name in enumerate(NFP_PAIRS):
+        try:
+            if k:
+                time.sleep(8)
+            df = add_indicators(fetch_twelvedata_pages(name, NFP_PAGES)).reset_index(drop=True)
+        except Exception as e:
+            print(f"Could not fetch {name}: {str(e)[:200]}")
+            continue
+        highs, lows = df["high"].values, df["low"].values
+        times = list(df["datetime"])
+        events = nfp_release_times(df["datetime"].iloc[0].to_pydatetime(), df["datetime"].iloc[-1].to_pydatetime())
+        count = 0
+        for n, rel in enumerate(events):
+            hour = pd.Timestamp(rel.replace(minute=0, second=0, tzinfo=None))
+            idx = df.index[df["datetime"] == hour]
+            if len(idx) == 0:
+                continue
+            i = int(idx[0])
+            if i < 30 or i + 1 + horizon >= len(df):
+                continue
+            atr = float(df["atr"].iloc[i - 1])
+            body = float(df["close"].iloc[i] - df["open"].iloc[i])
+            if not atr > 0 or abs(body) < 0.5 * atr:      # the first hour must show a clear move
+                continue
+            move = 1 if body > 0 else -1
+            entry = float(df["close"].iloc[i])
+            risk = 1.5 * atr
+            count += 1
+            for rule, direction in (("follow the move", move), ("fade the move", -move)):
+                side = "BUY" if direction > 0 else "SELL"
+                for a, b in NFP_TARGETS:
+                    sl = entry - direction * risk
+                    tp1, tp2 = entry + direction * a * risk, entry + direction * b * risk
+                    result, j, tp1_hit = walk_trade(side, entry, sl, tp1, tp2,
+                                                    highs[i + 1:i + 1 + horizon], lows[i + 1:i + 1 + horizon])
+                    if result is None:   # still open after 24h: close at the market
+                        last_close = float(df["close"].iloc[i + horizon])
+                        r = max(-1.0, min(b, direction * (last_close - entry) / risk))
+                    else:
+                        r = trade_r(result, a, b)
+                    trades.setdefault((rule, (a, b)), []).append((rel, r, r > 0))
+        per_pair[name] = (len(events), count)
+        used += count
+        print(f"{name}: {len(df)} candles, {count} usable NFP releases")
+    if not trades:
+        print("NFP test found no data.")
+        sys.exit(1)
+
+    lines = ["==== NFP TEST (R = multiples of the amount risked) ====",
+             "After each NFP the bot looks at the first hour's move (must be at least half an ATR) and either",
+             "FOLLOWS it or FADES it. Stop = 1.5 ATR. Half closes at TP1, stop to entry, rest runs to TP2.",
+             f"Pairs: {', '.join(NFP_PAIRS)}. Usable releases per pair: "
+             + ", ".join(f"{p} {c}" for p, (_, c) in per_pair.items()),
+             "'t' says how real the result is (under 2 = could easily be luck). 'good' needs t of 2.5+, positive in BOTH the",
+             "earlier 70% and later 30% of releases, and 30+ releases.", "",
+             f"{'rule':16s} {'TP1/TP2':>8s} {'trades':>6s} {'win%':>5s} {'total R':>8s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
+    for rule in ("follow the move", "fade the move"):
+        for tgt in NFP_TARGETS:
+            t = sorted(trades.get((rule, tgt), []), key=lambda x: x[0])
+            if not t:
+                continue
+            cut = int(len(t) * 0.7)
+            early, late = sum(x[1] for x in t[:cut]), sum(x[1] for x in t[cut:])
+            total, n = sum(x[1] for x in t), len(t)
+            wins = sum(1 for x in t if x[2])
+            by_event = {}
+            for x in t:                       # same-day trades on different pairs move together: count each release once
+                by_event.setdefault(x[0], []).append(x[1])
+            ts = t_score([sum(v) / len(v) for v in by_event.values()])
+            good = "  good" if early > 0 and late > 0 and len(by_event) >= 30 and ts >= 2.5 else ""
+            lines.append(f"{rule:16s} {tgt[0]:g}/{tgt[1]:g}".ljust(25)
+                         + f" {n:6d} {100 * wins / n:5.0f} {total:+8.1f} {total / n:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{good}")
+    lines += ["", "Spreads and slippage are NOT included, and they are large around NFP. Only a clear, consistent 'good'",
+              "result (with neighbouring rows looking similar) would justify trading NFP."]
+    text = "\n".join(lines)
+    print(text)
+    NFP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    NFP_FILE.write_text(text + "\n")
 
 
 # ---------- News posts ----------
@@ -774,6 +1031,32 @@ def fetch_calendar():
             "forecast": e.get("forecast") or "", "previous": e.get("previous") or "",
         })
     return sorted(events, key=lambda x: x["time"])
+
+
+CURRENT_EVENTS = []   # high-impact releases this week; filled by run_news, used to pause signals
+
+
+def pair_currencies(inst):
+    return set(inst["name"].split("/"))
+
+
+def blackout_event(inst, now):
+    """The high-impact release (if any) that currently makes it unwise to signal this pair."""
+    ccys = pair_currencies(inst)
+    for e in CURRENT_EVENTS:
+        if e["ccy"] in ccys and (
+            e["time"] - timedelta(minutes=BLACKOUT_BEFORE_MIN) <= now <= e["time"] + timedelta(minutes=BLACKOUT_AFTER_MIN)
+        ):
+            return e
+    return None
+
+
+def is_nfp(e):
+    return "non-farm" in e["title"].lower()
+
+
+def affected_pairs(e):
+    return [i["name"] for i in INSTRUMENTS if e["ccy"] in pair_currencies(i)]
 
 
 def event_line(e):
@@ -823,6 +1106,7 @@ def run_news(force=False):
         events = None
         print(f"Calendar unavailable: {str(e)[:100]}")
     if events is not None:
+        CURRENT_EVENTS[:] = events
         todays = [e for e in events if e["time"].strftime("%Y-%m-%d") == today]
         brief_due = force or (now.weekday() < 5 and BRIEF_HOUR_UTC <= now.hour < 20)
         if brief_due and news["brief_date"] != today:
@@ -830,7 +1114,8 @@ def run_news(force=False):
             if todays:
                 lines.append("High-impact releases today (Nigeria time):")
                 lines += [event_line(e) for e in todays]
-                lines += ["", "Prices can move fast around these. Be careful holding trades through them."]
+                lines += ["", f"Prices can jump around these. We pause new signals on the pairs involved "
+                          f"from {BLACKOUT_BEFORE_MIN} min before to {BLACKOUT_AFTER_MIN} min after each release."]
             else:
                 lines.append("No high-impact releases on the major currencies today. A quieter day.")
             send("\n".join(lines))
@@ -838,8 +1123,13 @@ def run_news(force=False):
         for e in events:
             mins = (e["time"] - now).total_seconds() / 60
             if 0 < mins <= ALERT_MINUTES and e["id"] not in news["alerted"]:
+                until = (e["time"] + timedelta(minutes=BLACKOUT_AFTER_MIN)).astimezone(WAT)
+                pairs = ", ".join(affected_pairs(e)) or e["ccy"]
+                extra = ("NFP is the biggest mover of the month, so expect wild swings. "
+                         if is_nfp(e) else "")
                 send(f"⚠️ <b>High-impact news in about {int(mins)} min</b>\n{event_line(e)}\n\n"
-                     f"Spreads can widen and price can jump. Consider staying out until it settles.")
+                     f"{extra}Spreads widen and price can jump, so we are NOT trading it. "
+                     f"New signals on {pairs} are paused until {until:%H:%M} (Nigeria time).")
                 news["alerted"].append(e["id"])
 
     # 2) headlines (daytime only, capped so the channel is not spammed)
@@ -872,6 +1162,22 @@ def run_news_safe(force=False):
         print(f"News step failed: {str(e)[:150]}")
 
 
+def retire_removed_instruments(state):
+    """Close (without scoring) any open trade on an instrument that has been switched off."""
+    names = {i["name"] for i in INSTRUMENTS}
+    gone = [t for t in state["open"] if t["pair"] not in names]
+    if not gone:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    for t in gone:
+        t["result"], t["r"], t["closed_at"] = "EXPIRED", 0.0, now
+        state["closed"].append(t)
+    state["open"] = [t for t in state["open"] if t["pair"] in names]
+    if any(t.get("live", True) for t in gone):
+        send("ℹ️ Synthetic index signals have been discontinued. Any open synthetic trade is no longer tracked.")
+    save_state(state)
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -888,6 +1194,9 @@ def main():
         run_news_safe(force=True)
         print("News step done.")
         return
+    if "--nfp" in sys.argv:
+        run_nfp()
+        return
 
     run_news_safe()
 
@@ -895,6 +1204,7 @@ def main():
     weekend = now.weekday() >= 5
 
     state = load_state()
+    retire_removed_instruments(state)
     backtest = load_backtest()
     cuts = cut_combos(backtest)
     if cuts:
@@ -940,8 +1250,12 @@ def main():
             continue
         for strategy in STRATEGIES:
             key = combo_key(strategy, inst["name"])
-            if key in cuts:
+            if key in cuts or not strategy_applies(strategy, inst):
                 continue  # removed by the backtest
+            ev = blackout_event(inst, now)
+            if ev:
+                print(f"News pause: no {inst['name']} signals around {ev['ccy']} {ev['title']}")
+                continue
             if any(t["pair"] == inst["name"] and t["strategy"] == strategy for t in state["open"]):
                 continue  # one open trade per instrument per strategy
             sig = STRATEGY_FUNCS[strategy](inst, df)
