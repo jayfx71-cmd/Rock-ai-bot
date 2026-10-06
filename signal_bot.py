@@ -1056,6 +1056,10 @@ def load_news():
     news.setdefault("seen", [])
     news.setdefault("day", "")
     news.setdefault("day_count", 0)
+    news.setdefault("lesson_date", "")
+    news.setdefault("lesson_idx", 0)
+    news.setdefault("levels_date", "")
+    news.setdefault("recap_date", "")
     return news
 
 
@@ -1267,6 +1271,13 @@ def run_news(force=False):
                      f"New signals on {pairs} are paused until {until:%H:%M} (Nigeria time).")
                 news["alerted"].append(e["id"])
 
+    # 1b) lesson of the day: a little fundamentals for newer traders
+    if (force or now.weekday() < 5) and 11 <= now.hour < 20 and news["lesson_date"] != today:
+        title, body = LESSONS[news["lesson_idx"] % len(LESSONS)]
+        send(f"🎓 <b>Lesson of the day:</b> {html.escape(title)}\n\n{html.escape(body)}")
+        news["lesson_date"] = today
+        news["lesson_idx"] += 1
+
     # 2) headlines (daytime only, capped so the channel is not spammed)
     if news["day"] != today:
         news["day"], news["day_count"] = today, 0
@@ -1286,6 +1297,108 @@ def run_news(force=False):
         if first_run:
             print(f"News: first run, posted {posted} headline(s) and marked the rest as seen.")
     save_news(news)
+
+
+# ---------- Extra daily content: lesson, levels to watch, day recap ----------
+LESSONS = [
+    ("What is a pip?", "A pip is the standard small step in a price. On EUR/USD it is 0.0001. If EUR/USD moves from 1.1000 to 1.1050, that is 50 pips. Your stop loss and targets are measured in pips."),
+    ("What is a stop loss?", "A stop loss is an order that closes your trade at a set price if the market goes against you. It caps your loss before you even enter. Trading without one is how accounts blow up."),
+    ("What does 1:2 mean?", "1:2 (risk to reward) means you risk 1 to try to make 2. With a 1:2 setup you can be wrong more often than right and still make money. At 1:2, winning just 40% of trades is enough to come out ahead."),
+    ("Why risk only 1% per trade?", "If you risk 1% per trade, ten losses in a row cost about 10% of your account. If you risk 10%, ten losses wipe you out. Small risk keeps you in the game long enough for your edge to show."),
+    ("What is the spread?", "The spread is the small gap between the buy price and the sell price. It is a cost you pay the moment you enter. It gets wider around big news, so we avoid trading right through it."),
+    ("What is leverage?", "Leverage lets you control a bigger position than your cash. It magnifies wins AND losses. High leverage does not make you richer faster. It makes mistakes cost more."),
+    ("What is a trend?", "An uptrend is price making higher highs and higher lows. A downtrend is the reverse. Trading with the trend is usually easier than fighting it, which is why our strategy only takes breakouts that agree with the trend."),
+    ("What is a breakout?", "A breakout is when price closes beyond a level it struggled to pass, like yesterday's high. Sometimes it keeps running. Sometimes it fails and snaps back. That is why every trade needs a stop loss."),
+    ("What is break-even?", "When TP1 is hit, we close half the trade and move the stop to the entry price. The remaining half can no longer lose money, and it can still run to TP2."),
+    ("Why do losses happen?", "Every strategy has losing trades, even good ones. What matters is the result over many trades, not one trade. Judge a strategy on at least 100 trades, never on 3."),
+    ("Why we skip big news", "Around big releases like NFP, prices jump in both directions and spreads widen. Stops can be hit by a spike that reverses seconds later. Skipping those minutes avoids a lot of random losses."),
+    ("What is a safe haven?", "When investors are scared, money often flows into the US dollar, the Japanese yen, the Swiss franc and gold. That is why those can rise on bad news elsewhere."),
+    ("Why does gold move opposite the dollar?", "Gold is priced in dollars. When the dollar gets stronger, gold costs more for everyone else, so demand and price often fall. The link is common but not perfect."),
+    ("What are interest rates doing to currencies?", "Money tends to flow where it earns more interest. Higher rates usually strengthen a currency. Cuts usually weaken it. This is why central bank days are so important."),
+]
+
+
+def run_extras(candles, state, now):
+    """Levels to watch (morning) and a day recap (evening). Real data only: nothing here is invented."""
+    news = load_news()
+    today = now.strftime("%Y-%m-%d")
+    if now.weekday() >= 5:
+        return
+    changed = False
+
+    # 1) levels to watch: the exact lines the Daily Break strategy is waiting for
+    if 7 <= now.hour < 16 and news["levels_date"] != today:
+        blocks = []
+        for name in STRATEGY_PAIRS.get("Daily Break", []):
+            df = candles.get(name)
+            inst = next((i for i in INSTRUMENTS if i["name"] == name), None)
+            if df is None or inst is None or len(df) < 450:
+                continue
+            minutes = max(1, int(round((df["datetime"].iloc[-1] - df["datetime"].iloc[-2]).total_seconds() / 60)))
+            d = lab_prepare(df.reset_index(drop=True), minutes)
+            groups = sorted(lab_day_groups(d).items())
+            if len(groups) < 2 or str(groups[-1][0]) != today:
+                continue
+            prev, cur = groups[-2][1], groups[-1][1]
+            hi, lo, dec = float(d["h"][prev].max()), float(d["l"][prev].min()), decimals(inst)
+            i = d["n"] - 1
+            up, down = lab_trend(d, i, "BUY"), lab_trend(d, i, "SELL")
+            broke = any(7 * 60 <= d["mod"][j] <= 16 * 60 and (d["c"][j] > hi or d["c"][j] < lo) for j in cur)
+            if broke:
+                note = "Price already closed beyond yesterday's range, so no Daily Break today."
+            elif up:
+                note = f"📈 Trend up. Watching a 30-min close ABOVE <code>{hi:.{dec}f}</code> for a BUY."
+            elif down:
+                note = f"📉 Trend down. Watching a 30-min close BELOW <code>{lo:.{dec}f}</code> for a SELL."
+            else:
+                note = "➖ Trend unclear. No trade unless the trend becomes clear."
+            blocks.append(f"<b>{name}</b>\n   Yesterday: high <code>{hi:.{dec}f}</code> · low <code>{lo:.{dec}f}</code>\n   {note}")
+        if blocks:
+            send(f"📍 <b>{BRAND} LEVELS TO WATCH</b> · {now.astimezone(WAT):%a %d %b}\n\n"
+                 "Our Daily Break strategy waits for a 30-minute close beyond yesterday's high or low, "
+                 "in the direction of the trend (08:00 to 17:00 Nigeria time). These are today's lines:\n\n"
+                 + "\n\n".join(blocks)
+                 + "\n\nNo breakout means no trade. Waiting is part of the plan.")
+            news["levels_date"] = today
+            changed = True
+
+    # 2) day recap
+    if now.hour >= 20 and news["recap_date"] != today:
+        live = [t for t in state["closed"] + state["open"] if t.get("live", True)]
+        opened = [t for t in live if str(t.get("opened_at", ""))[:10] == today]
+        closed = [t for t in state["closed"] if t.get("live", True) and str(t.get("closed_at", ""))[:10] == today]
+        still = [t for t in state["open"] if t.get("live", True)]
+        lines = [f"📊 <b>{BRAND} DAY RECAP</b> · {now.astimezone(WAT):%a %d %b}", ""]
+        lines.append(f"Signals posted today: {len(opened)}")
+        if closed:
+            icon = {"TP2": "✅", "TP1": "🟡", "SL": "❌", "EXPIRED": "⏱"}
+            lines += [f"{icon.get(t['result'], '•')} {t['side']} {t['pair']}: {t['r']:+.1f}R" for t in closed]
+            lines.append(f"Closed today: {sum(t['r'] for t in closed):+.1f}R")
+        if still:
+            lines.append("Still open: " + ", ".join(f"{t['side']} {t['pair']}" for t in still))
+        if not opened and not closed:
+            lines += ["", "No setups today. Daily Break only trades a clean breakout of yesterday's high or low that agrees "
+                      "with the trend. No setup means no trade, and that is the plan."]
+        if state["closed"]:
+            try:
+                lines += ["", stats_line(state, "Daily Break")]
+            except Exception:
+                pass
+        send("\n".join(lines))
+        news["recap_date"] = today
+        changed = True
+
+    if changed:
+        save_news(news)
+
+
+def run_extras_safe(candles, state, now):
+    if not NEWS:
+        return
+    try:
+        run_extras(candles, state, now)
+    except Exception as e:  # extras must never stop the signals
+        print(f"Extras step failed: {str(e)[:150]}")
 
 
 def run_news_safe(force=False):
@@ -1761,6 +1874,7 @@ def main():
 
     resolve_open(state, candles)
     save_state(state)
+    run_extras_safe(candles, state, now)
 
     for inst in todo:
         df = candles.get(inst["name"])
