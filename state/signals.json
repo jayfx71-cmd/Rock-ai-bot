@@ -122,6 +122,13 @@
     "London Breakout|GBP/USD": false,
     "London Breakout|USD/JPY": false,
     "London Breakout|USD/CAD": true,
-    "London Breakout|XAU/USD": false
+    "London Breakout|XAU/USD": false,
+    "Daily Break|EUR/USD": false,
+    "Daily Break|GBP/USD": false,
+    "Daily Break|USD/JPY": false,
+    "Daily Break|AUD/USD": false,
+    "Daily Break|USD/CAD": false,
+    "Daily Break|GBP/JPY": false,
+    "Daily Break|XAU/USD": false
   }
 }
