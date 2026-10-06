@@ -1820,6 +1820,107 @@ def run_lab():
     LAB_FILE.write_text(text + "\n")
 
 
+# ---------- Images: signal charts ----------
+CHARTS = True          # draw a chart image for every signal (falls back to plain text if anything goes wrong)
+CHART_CANDLES = 70     # how many recent candles the chart shows
+
+
+def _plt():
+    """Load matplotlib; install it on the fly if requirements.txt was not updated yet."""
+    try:
+        import matplotlib
+    except ImportError:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages", "matplotlib"],
+                       check=False)
+        import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    return plt
+
+
+def make_signal_chart(s, df, path="signal_chart.png"):
+    """Candles with entry, stop loss, TP1 and TP2 drawn on them. Returns the file path."""
+    plt = _plt()
+    bg, fg, grid = "#0f1722", "#e6edf3", "#243040"
+    up, down, buy_c, sell_c = "#2ebd85", "#f6465d", "#2ebd85", "#f6465d"
+    d = df.tail(CHART_CANDLES).reset_index(drop=True)
+    n, pad = len(d), 14
+    fig, ax = plt.subplots(figsize=(9, 5.2), dpi=150)
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+    for i, r in d.iterrows():
+        col = up if r["close"] >= r["open"] else down
+        ax.plot([i, i], [r["low"], r["high"]], color=col, linewidth=0.9, zorder=2)
+        body_lo, body_hi = min(r["open"], r["close"]), max(r["open"], r["close"])
+        ax.add_patch(plt.Rectangle((i - 0.33, body_lo), 0.66, max(body_hi - body_lo, 1e-9),
+                                   facecolor=col, edgecolor=col, zorder=3))
+    entry, sl, tp1, tp2 = s["entry"], s["sl"], s["tp1"], s["tp2"]
+    x0, x1 = n - 1, n - 1 + pad
+    ax.fill_between([x0, x1], entry, tp2, color=buy_c, alpha=0.10, zorder=1)
+    ax.fill_between([x0, x1], entry, sl, color=sell_c, alpha=0.14, zorder=1)
+    levels = [("TP2", tp2, up, f"1:{s['tp2_r']:g}"), ("TP1", tp1, up, f"1:{s['tp1_r']:g}"),
+              ("ENTRY", entry, fg, ""), ("SL", sl, down, "")]
+    for name, price, col, extra in levels:
+        ax.plot([x0 - 12, x1], [price, price], color=col, linewidth=1.1,
+                linestyle="-" if name == "ENTRY" else "--", zorder=4)
+        label = f"{name} {price:.{len(str(s['entry']).split('.')[-1])}f}" + (f"  ({extra})" if extra else "")
+        ax.text(x1 + 0.4, price, label, color=col, va="center", ha="left", fontsize=8.5, fontweight="bold")
+    lows = list(d["low"]) + [sl, entry, tp1, tp2]
+    highs = list(d["high"]) + [sl, entry, tp1, tp2]
+    span = max(highs) - min(lows)
+    ax.set_ylim(min(lows) - span * 0.06, max(highs) + span * 0.06)
+    ax.set_xlim(-1, x1 + 11)
+    step = max(1, n // 6)
+    ticks = list(range(0, n, step))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([d["datetime"].iloc[i].strftime("%d %b %H:%M") for i in ticks], color=fg, fontsize=7.5)
+    ax.tick_params(axis="y", colors=fg, labelsize=7.5)
+    ax.yaxis.tick_left()
+    ax.grid(color=grid, linewidth=0.5, alpha=0.7)
+    for sp in ax.spines.values():
+        sp.set_color(grid)
+    side_col = buy_c if s["side"] == "BUY" else sell_c
+    arrow = "BUY" if s["side"] == "BUY" else "SELL"
+    fig.text(0.04, 0.945, f"{arrow}  {s['pair']}", color=side_col, fontsize=17, fontweight="bold", va="center")
+    fig.text(0.04, 0.895, f"{s['strategy']}  |  30-minute chart  |  risk {s['risk_pips']} {s['unit']}",
+             color=fg, fontsize=9, va="center", alpha=0.85)
+    fig.text(0.96, 0.945, BRAND, color=fg, fontsize=15, fontweight="bold", va="center", ha="right")
+    fig.text(0.96, 0.895, "VIP SIGNAL", color=fg, fontsize=9, va="center", ha="right", alpha=0.7)
+    fig.text(0.5, 0.012, "Trade at your own risk. Past performance does not guarantee future results.",
+             color=fg, fontsize=7, ha="center", alpha=0.55)
+    fig.subplots_adjust(left=0.07, right=0.80, top=0.86, bottom=0.10)
+    fig.savefig(path, facecolor=bg)
+    plt.close(fig)
+    return path
+
+
+def send_photo(path, caption=""):
+    with open(path, "rb") as f:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+            data={"chat_id": TG_CHAT, "caption": caption, "parse_mode": "HTML"},
+            files={"photo": f}, timeout=60,
+        )
+    r.raise_for_status()
+
+
+def send_signal(sig, text, df):
+    """Post a signal as chart + caption. If the picture fails for any reason, post the plain text instead."""
+    if CHARTS and df is not None:
+        try:
+            path = make_signal_chart(sig, df)
+            if len(text) <= 1000:
+                send_photo(path, text)
+            else:
+                send_photo(path)
+                send(text)
+            return
+        except Exception as e:
+            print(f"Chart failed, sending text only: {str(e)[:150]}")
+    send(text)
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -1915,7 +2016,7 @@ def main():
             if sig and state["last_signal"].get(key) != sig["candle"]:
                 sig["live"] = combo_active(state, key, backtest)
                 if sig["live"]:
-                    send(format_signal(sig, winrate_30d_line(state)))
+                    send_signal(sig, format_signal(sig, winrate_30d_line(state)), df)
                 else:
                     print(f"Shadow trade (paused, not posted): {key} {sig['side']} @ {sig['entry']}")
                 state["open"].append(sig)
