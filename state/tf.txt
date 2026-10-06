@@ -1,0 +1,11 @@
+==== TIMEFRAME TEST: London Breakout, 200-EMA+slope filter, TP1 1:1 / TP2 1:2, after spreads ====
+Range, ATR and trend are the same H1 ones everywhere. Only the entry candle (60 / 30 / 15 min) changes.
+Different timeframes cover different amounts of history, so compare R/trade and t, not total R.
+
+ entry trades  win%  total R  R/trade     t  early R   late R
+  60m    504    54     +4.7    +0.01   0.2    -26.0    +30.7
+  30m    537    54    +14.8    +0.03   0.6    -10.7    +25.5
+  15m    448    52     -5.1    -0.01  -0.2    -27.5    +22.4
+
+Spreads are subtracted; slippage is not. Lower timeframes pay the spread more often per move,
+so a 15/30 minute row only matters if it clearly beats the 60 minute row.
