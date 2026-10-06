@@ -1,0 +1,26 @@
+==== WIDEN TEST: Daily Break, 30-minute entries, TP1 1:1 / TP2 1:2, after spreads ====
+'sig/day' = average signals per day on that pair. 'good' = t of 3+, positive early AND late, 30+ trades.
+
+-- Window: until 17:00 Nigeria time (today) --
+pair     trades sig/day  win%  R/trade     t  early R   late R
+AUD/USD     259    0.37    49    -0.10  -1.5    -20.2     -5.9
+EUR/USD     249    0.35    49    -0.07  -1.0     -6.8    -10.4
+GBP/JPY     260    0.37    49    -0.12  -2.0    -20.9    -11.5
+GBP/USD     254    0.36    52    -0.01  -0.2     +1.5     -5.2
+USD/CAD     269    0.38    52    -0.06  -0.9    -18.5     +2.0
+USD/JPY     269    0.38    50    -0.03  -0.5     +4.0    -13.0
+XAU/USD     249    0.35    61    +0.25   3.7    +35.3    +27.7  good
+ALL        1809    2.57    52    -0.02  -0.9    -25.6    -16.2
+
+-- Window: until 21:00 Nigeria time --
+pair     trades sig/day  win%  R/trade     t  early R   late R
+AUD/USD     284    0.40    49    -0.11  -1.8    -22.1    -10.0
+EUR/USD     266    0.38    50    -0.05  -0.7     -2.1    -10.6
+GBP/JPY     279    0.40    47    -0.16  -2.5    -27.7    -15.8
+GBP/USD     273    0.39    50    -0.04  -0.6     -2.6     -8.4
+USD/CAD     285    0.41    51    -0.08  -1.3    -21.6     -1.3
+USD/JPY     286    0.41    49    -0.05  -0.8     +2.2    -17.3
+XAU/USD     272    0.38    61    +0.24   3.7    +34.3    +32.2  good
+ALL        1945    2.77    51    -0.04  -1.5    -39.7    -31.2
+
+More pairs mean more signals, but only add a pair if it holds up on its own (positive early and late).
