@@ -1,7 +1,7 @@
 """
 Free automated signal bot (Forex + Deriv synthetic indices) with a learning layer.
-Live strategies: EMA 20/50 crossover (+RSI filter) and Price Action (engulfing at the 50 EMA).
-Research strategies (backtest/sweep only until proven): London Breakout and Mean Reversion.
+Live strategy: London Breakout (break of the overnight range at the London open, with a 200 EMA trend filter)
+on EUR/USD, GBP/USD and gold. Research strategies (backtest/sweep only): EMA Cross, Price Action, Mean Reversion.
 ATR-based stop loss, two targets (TP1 1:3, TP2 1:4). Runs on a schedule via GitHub Actions,
 posts to a Telegram channel, and tracks TP/SL results per strategy in state/signals.json.
 
@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -43,9 +44,17 @@ SYNTHETICS_OFF = {
     "Volatility 90 (1s)": "1HZ90V",
 }
 
-STRATEGIES = ["EMA Cross", "Price Action"]  # LIVE: these post to the channel (delete a name to switch it off)
-RESEARCH_STRATEGIES = ["London Breakout", "Mean Reversion"]  # tested by --backtest/--sweep only; move a name
-                                                              # up into STRATEGIES once the sweep shows it works
+STRATEGIES = ["London Breakout"]  # LIVE: these post to the channel (delete a name to switch it off)
+RESEARCH_STRATEGIES = ["EMA Cross", "Price Action", "Mean Reversion"]  # tested by --backtest/--sweep only; move a
+                                                                       # name up into STRATEGIES once it proves itself
+STRATEGY_PAIRS = {"London Breakout": ["EUR/USD", "GBP/USD", "XAU/USD"]}  # live pairs per strategy (tests use all pairs)
+LONDON_FILTER = True   # London Breakout only trades with the 200 EMA trend (price on that side AND the EMA sloping that way)
+TREND_EMA = 200
+COSTS = True           # backtest/sweep subtract the spread from every trade (as a fraction of the risk)
+SPREADS = {            # typical spread in price units (round trip is paid once); check your own broker
+    "EUR/USD": 0.00010, "GBP/USD": 0.00015, "USD/JPY": 0.012, "AUD/USD": 0.00012,
+    "USD/CAD": 0.00018, "GBP/JPY": 0.025, "XAU/USD": 0.35,
+}
 ALL_STRATEGIES = STRATEGIES + RESEARCH_STRATEGIES
 STRATEGY_KINDS = {"London Breakout": ("forex",), "Mean Reversion": ("forex",)}  # others run on everything
 STRATEGY_TARGETS = {"London Breakout": (1.0, 2.0), "Mean Reversion": (1.0, 1.5)}  # (TP1, TP2) in R; others use TP1_R/TP2_R
@@ -54,7 +63,7 @@ SESSION_START, SESSION_END = 7, 11   # London Breakout: signals only when the ca
 ASIA_RANGE_HOURS = 7                 # overnight range = candles opening 00:00-06:00 UTC
 
 CANDLE_SECONDS = 3600  # H1 candles
-CANDLE_COUNT = 250
+CANDLE_COUNT = 600     # enough history for the 200 EMA to settle
 FAST_EMA, SLOW_EMA = 20, 50
 RSI_PERIOD = 14
 ATR_PERIOD = 14
@@ -78,7 +87,6 @@ CUT_MIN_TRADES = 10    # ... and the backtest had at least this many trades
 
 SWEEP_TARGETS = [(1.0, 1.5), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (3.0, 5.0)]   # (TP1, TP2) pairs the --sweep test compares
 SWEEP_FILTERS = ["none", "ema200", "ema200+slope"]    # trend filters the --sweep test compares
-TREND_EMA = 200
 SWEEP_FILE = Path("state/sweep.txt")
 
 DERIV_URLS = [  # tried in order; the first one that answers is used
@@ -256,6 +264,9 @@ def add_indicators(df):
     ).max(axis=1)
     df["atr"] = tr.ewm(alpha=1 / ATR_PERIOD, adjust=False).mean()
 
+    df["ema200"] = df["close"].ewm(span=TREND_EMA, adjust=False).mean()
+    df["ema200_lag"] = df["ema200"].shift(10)
+
     mid = df["close"].rolling(BB_PERIOD).mean()
     sd = df["close"].rolling(BB_PERIOD).std(ddof=0)
     df["bb_up"], df["bb_low"] = mid + 2 * sd, mid - 2 * sd
@@ -284,7 +295,19 @@ def unit_label(inst):
 
 
 def strategy_applies(strategy, inst):
+    """Can this strategy be tested on this instrument?"""
     return inst["kind"] in STRATEGY_KINDS.get(strategy, ("forex", "synthetic"))
+
+
+def live_ok(strategy, inst):
+    """May this strategy post live signals on this instrument?"""
+    return strategy_applies(strategy, inst) and inst["name"] in STRATEGY_PAIRS.get(strategy, [i["name"] for i in INSTRUMENTS])
+
+
+def cost_r(inst, entry, sl):
+    """Spread as a fraction of the amount risked (subtracted from backtest results)."""
+    risk = abs(entry - sl)
+    return min(2.0, SPREADS.get(inst["name"], 0.0) / risk) if COSTS and risk > 0 else 0.0
 
 
 def build_signal(inst, strategy, side, entry, sl, candle_time):
@@ -406,6 +429,14 @@ def strategy_london_breakout(inst, df):
         side, sl = "SELL", mid + 0.1 * atr
     else:
         return None
+    if LONDON_FILTER:   # trade only with the long-term trend
+        ema, ema_old = float(last.ema200), float(last.ema200_lag)
+        if ema_old != ema_old:   # not enough history yet
+            return None
+        if side == "BUY" and not (entry > ema and ema > ema_old):
+            return None
+        if side == "SELL" and not (entry < ema and ema < ema_old):
+            return None
     risk = abs(entry - sl)
     if risk > 3 * atr:
         return None
@@ -689,7 +720,7 @@ def simulate(inst, df):
                     continue
                 result, j = ("TP1" if tp1_hit else "EXPIRED"), expire - 1
             busy_until = i + 1 + j
-            r = trade_r(result, sig["tp1_r"], sig["tp2_r"])
+            r = trade_r(result, sig["tp1_r"], sig["tp2_r"]) - cost_r(inst, sig["entry"], sig["sl"])
             trades.append({"strategy": strategy, "pair": inst["name"], "i": i, "result": result, "r": r})
     return trades
 
@@ -774,6 +805,8 @@ def run_sweep():
         print("Sweep found no data. Check your API keys and connections.")
         sys.exit(1)
 
+    global LONDON_FILTER
+    LONDON_FILTER = False   # the sweep applies the trend filters itself, so compare them fairly
     expire = max(1, EXPIRE_HOURS * 3600 // CANDLE_SECONDS)
     rows = {}  # (kind, strategy, filter, (tp1, tp2)) -> list of (is_early, r, won)
     for inst, df in data:
@@ -813,11 +846,11 @@ def run_sweep():
                                 continue
                             result, j = ("TP1" if tp1_hit else "EXPIRED"), expire - 1
                         busy = i + 1 + j
-                        r = trade_r(result, a, b)
+                        r = trade_r(result, a, b) - cost_r(inst, sg["entry"], sg["sl"])
                         out.append((i < split, r, r > 0))
         print(f"{inst['name']}: swept {len(df)} candles")
 
-    lines = ["==== SWEEP (R = multiples of the amount risked) ===="]
+    lines = ["==== SWEEP (R = multiples of the amount risked" + (", AFTER typical spreads) ====" if COSTS else ") ====")]
     lines.append("Half closes at TP1, stop moves to entry, rest runs to TP2. Each row pools every instrument of that type.")
     lines.append("'t' says how real a result is (under 2 = could easily be luck). 'good' needs t of 3+, positive in BOTH the")
     lines.append("early 70% and the late 30% of history, and 30+ trades.")
@@ -847,7 +880,8 @@ def run_sweep():
                         + f" {n:6d} {100 * wins / n:5.0f} {total:+8.1f} {total / n:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{good}"
                     )
     lines.append("")
-    lines.append("Spreads and slippage are NOT included. Many variants were tried, so a lucky winner is likely.")
+    lines.append(("Typical spreads ARE subtracted; slippage is not. " if COSTS else "Spreads and slippage are NOT included. ")
+                 + "Many variants were tried, so a lucky winner is likely.")
     lines.append("Trust only rows marked good, and only when neighbouring rows look similar.")
     text = "\n".join(lines)
     print(text)
@@ -1179,6 +1213,151 @@ def retire_removed_instruments(state):
     save_state(state)
 
 
+# ---------- Timeframe test: London Breakout with 30 / 15 minute entries ----------
+TF_PAIRS = ["EUR/USD", "GBP/USD", "XAU/USD"]
+TF_MINUTES = [60, 30, 15]
+TF_PAGES = {60: 3, 30: 6, 15: 10}   # pages of 5000 candles (about 1 to 2 years each)
+TF_FILE = Path("state/tf.txt")
+
+
+def fetch_tf(symbol, minutes, pages):
+    """Several pages of candles at any size, going back in time (slow: obeys the rate limit)."""
+    interval = {60: "1h", 30: "30min", 15: "15min"}[minutes]
+    frames, end = [], None
+    for page in range(pages):
+        params = {"symbol": symbol, "interval": interval, "outputsize": 5000, "timezone": "UTC", "apikey": TD_KEY}
+        if end:
+            params["end_date"] = end
+        data = requests.get("https://api.twelvedata.com/time_series", params=params, timeout=90).json()
+        if "values" not in data:
+            if page == 0:
+                raise RuntimeError(data.get("message", str(data)))
+            break
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        frames.append(df)
+        if len(df) < 100:
+            break
+        end = df["datetime"].min().strftime("%Y-%m-%d %H:%M:%S")
+        time.sleep(8)
+    df = pd.concat(frames).drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
+    for c in ["open", "high", "low", "close"]:
+        df[c] = df[c].astype(float)
+    now = datetime.utcnow()
+    return df[df["datetime"] + timedelta(minutes=minutes) <= now].reset_index(drop=True)
+
+
+def tf_breakout_trades(inst, df, minutes):
+    """London Breakout on any candle size. Range, ATR and trend are always the same H1-based ones,
+    so only the ENTRY candle changes (the first 30/15 minute close beyond the overnight range)."""
+    k = 60 // minutes
+    h1 = df.set_index("datetime").resample("1h").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+    prev_close = h1["close"].shift(1)
+    tr = pd.concat([h1["high"] - h1["low"], (h1["high"] - prev_close).abs(), (h1["low"] - prev_close).abs()], axis=1).max(axis=1)
+    atr_h = tr.ewm(alpha=1 / ATR_PERIOD, adjust=False).mean().shift(1)     # last COMPLETED hour only
+    ema_h = h1["close"].ewm(span=TREND_EMA, adjust=False).mean().shift(1)
+    ema_h_old = ema_h.shift(10)
+    hour_idx = df["datetime"].dt.floor("1h")
+    atr = atr_h.reindex(hour_idx).values
+    ema = ema_h.reindex(hour_idx).values
+    ema_old = ema_h_old.reindex(hour_idx).values
+    dts, highs, lows, closes = df["datetime"], df["high"].values, df["low"].values, df["close"].values
+    days = dts.dt.date.values
+    hours = dts.dt.hour.values
+    expire = max(1, EXPIRE_HOURS * 60 // minutes)
+    out, busy = [], -1
+    minute_of_day = hours * 60 + dts.dt.minute.values
+    split = int(len(df) * 0.7)
+    a, b = STRATEGY_TARGETS["London Breakout"]
+    starts = {}
+    for i, d in enumerate(days):
+        starts.setdefault(d, []).append(i)
+    for day, idx in starts.items():
+        idx = np.array(idx)
+        asia = idx[hours[idx] < SESSION_START]
+        sess = idx[(minute_of_day[idx] >= SESSION_START * 60) & (minute_of_day[idx] <= SESSION_END * 60)]
+        if len(asia) < ASIA_RANGE_HOURS * k or len(sess) == 0:
+            continue
+        hi, lo = highs[asia].max(), lows[asia].min()
+        i = None
+        for c in sess:
+            if closes[c] > hi or closes[c] < lo:
+                i = c
+                break
+        if i is None or i <= busy or i >= len(df) - 1:
+            continue
+        at, e, eo = atr[i], ema[i], ema_old[i]
+        if not (at > 0) or e != e or eo != eo:
+            continue
+        if not (0.5 * at <= hi - lo <= 4 * at):
+            continue
+        entry, mid = closes[i], (hi + lo) / 2
+        side = "BUY" if entry > hi else "SELL"
+        sl = mid - 0.1 * at if side == "BUY" else mid + 0.1 * at
+        if side == "BUY" and not (entry > e and e > eo):
+            continue
+        if side == "SELL" and not (entry < e and e < eo):
+            continue
+        risk = abs(entry - sl)
+        if risk > 3 * at:
+            continue
+        if risk < 0.5 * at:
+            sl = entry - 0.5 * at if side == "BUY" else entry + 0.5 * at
+        risk = abs(entry - sl)
+        sign = 1 if side == "BUY" else -1
+        end = min(len(df), i + 1 + expire)
+        result, j, tp1_hit = walk_trade(side, entry, sl, entry + sign * a * risk, entry + sign * b * risk,
+                                        highs[i + 1:end], lows[i + 1:end])
+        if result is None:
+            if end - (i + 1) < expire:
+                continue
+            result, j = ("TP1" if tp1_hit else "EXPIRED"), expire - 1
+        busy = i + 1 + j
+        r = trade_r(result, a, b) - cost_r(inst, entry, sl)
+        out.append((i < split, r, r > 0))
+    return out
+
+
+def run_tf():
+    results = {}   # minutes -> list of (is_early, r, won)
+    for inst in INSTRUMENTS:
+        if inst["name"] not in TF_PAIRS:
+            continue
+        for minutes in TF_MINUTES:
+            try:
+                time.sleep(8)
+                df = fetch_tf(inst["symbol"], minutes, TF_PAGES[minutes])
+            except Exception as e:
+                print(f"Could not fetch {inst['name']} {minutes}m: {str(e)[:150]}")
+                continue
+            trades = tf_breakout_trades(inst, df, minutes)
+            results.setdefault(minutes, []).extend(trades)
+            print(f"{inst['name']} {minutes}m: {len(df)} candles, {len(trades)} trades")
+    lines = ["==== TIMEFRAME TEST: London Breakout, 200-EMA+slope filter, TP1 1:1 / TP2 1:2, after spreads ====",
+             "Range, ATR and trend are the same H1 ones everywhere. Only the entry candle (60 / 30 / 15 min) changes.",
+             "Different timeframes cover different amounts of history, so compare R/trade and t, not total R.", "",
+             f"{'entry':>6s} {'trades':>6s} {'win%':>5s} {'total R':>8s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
+    for minutes in TF_MINUTES:
+        t = results.get(minutes, [])
+        if not t:
+            continue
+        n = len(t)
+        wins = sum(1 for x in t if x[2])
+        total = sum(x[1] for x in t)
+        early = sum(x[1] for x in t if x[0])
+        late = sum(x[1] for x in t if not x[0])
+        ts = t_score([x[1] for x in t])
+        good = "  good" if early > 0 and late > 0 and n >= 30 and ts >= 3 else ""
+        lines.append(f"{minutes:>4d}m {n:6d} {100 * wins / n:5.0f} {total:+8.1f} {total / n:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{good}")
+    lines += ["", "Spreads are subtracted; slippage is not. Lower timeframes pay the spread more often per move,",
+              "so a 15/30 minute row only matters if it clearly beats the 60 minute row."]
+    text = "\n".join(lines)
+    print(text)
+    TF_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TF_FILE.write_text(text + "\n")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -1197,6 +1376,9 @@ def main():
         return
     if "--nfp" in sys.argv:
         run_nfp()
+        return
+    if "--tf" in sys.argv:
+        run_tf()
         return
 
     run_news_safe()
@@ -1217,7 +1399,7 @@ def main():
     for inst in INSTRUMENTS:
         if weekend and inst["kind"] == "forex":
             continue
-        wanted = any(combo_key(s, inst["name"]) not in cuts for s in STRATEGIES)
+        wanted = any(live_ok(s, inst) and combo_key(s, inst["name"]) not in cuts for s in STRATEGIES)
         if wanted or inst["name"] in still_open:
             todo.append(inst)
     if weekend:
@@ -1251,8 +1433,8 @@ def main():
             continue
         for strategy in STRATEGIES:
             key = combo_key(strategy, inst["name"])
-            if key in cuts or not strategy_applies(strategy, inst):
-                continue  # removed by the backtest
+            if key in cuts or not live_ok(strategy, inst):
+                continue  # removed by the backtest, or not a live pair for this strategy
             ev = blackout_event(inst, now)
             if ev:
                 print(f"News pause: no {inst['name']} signals around {ev['ccy']} {ev['title']}")
