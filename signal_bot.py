@@ -1337,7 +1337,7 @@ def run_extras(candles, state, now):
 
     # 1) levels to watch: the exact lines the Daily Break strategy is waiting for
     if 7 <= now.hour < 16 and news["levels_date"] != today:
-        blocks = []
+        blocks, panels = [], []
         for name in STRATEGY_PAIRS.get("Daily Break", []):
             df = candles.get(name)
             inst = next((i for i in INSTRUMENTS if i["name"] == name), None)
@@ -1355,20 +1355,32 @@ def run_extras(candles, state, now):
             broke = any(7 * 60 <= d["mod"][j] <= 16 * 60 and (d["c"][j] > hi or d["c"][j] < lo) for j in cur)
             if broke:
                 note = "Price already closed beyond yesterday's range, so no Daily Break today."
+                short, pstate, watch = "already broke out today: no Daily Break", "broke", "No Daily Break today"
             elif up:
                 note = f"📈 Trend up. Watching a 30-min close ABOVE <code>{hi:.{dec}f}</code> for a BUY."
+                short, pstate = f"trend UP: watching a close above {hi:.{dec}f} (BUY)", "up"
+                watch = f"Waiting for a 30-min close above {hi:.{dec}f}  →  BUY"
             elif down:
                 note = f"📉 Trend down. Watching a 30-min close BELOW <code>{lo:.{dec}f}</code> for a SELL."
+                short, pstate = f"trend DOWN: watching a close below {lo:.{dec}f} (SELL)", "down"
+                watch = f"Waiting for a 30-min close below {lo:.{dec}f}  →  SELL"
             else:
                 note = "➖ Trend unclear. No trade unless the trend becomes clear."
+                short, pstate, watch = "trend unclear: no trade unless it clears", "none", "No trade unless the trend becomes clear"
+            panels.append({"name": name, "df": df, "hi": hi, "lo": lo, "dec": dec, "note": short,
+                           "state": pstate, "watch": watch})
             blocks.append(f"<b>{name}</b>\n   Yesterday: high <code>{hi:.{dec}f}</code> · low <code>{lo:.{dec}f}</code>\n   {note}")
         if blocks:
-            send(f"📍 <b>{BRAND} LEVELS TO WATCH</b> · {now.astimezone(WAT):%a %d %b}\n\n"
-                 "Our Daily Break strategy waits for a 30-minute close beyond yesterday's high or low, "
-                 "in the direction of the trend (08:00 to 17:00 Nigeria time). These are today's lines:\n\n"
-                 + "\n\n".join(blocks)
-                 + "\n\nNo breakout means no trade. Waiting is part of the plan.")
-            news["levels_date"] = today
+            news["levels_date"] = today   # mark first, so a retry or a second run cannot post it twice
+            save_news(news)
+            head = f"📍 <b>{BRAND} LEVELS TO WATCH</b> · {now.astimezone(WAT):%a %d %b}"
+            intro = ("Our Daily Break strategy waits for a 30-minute close beyond yesterday's high or low, "
+                     "in the direction of the trend (08:00 to 17:00 Nigeria time).")
+            full = f"{head}\n\n{intro} These are today's lines:\n\n" + "\n\n".join(blocks) \
+                   + "\n\nNo breakout means no trade. Waiting is part of the plan."
+            short = f"{head}\n\n{intro}\n\nNo breakout means no trade. Waiting is part of the plan."
+            send_image_or_text(lambda: make_levels_chart(panels, f"LEVELS TO WATCH · {now.astimezone(WAT):%a %d %b}"),
+                               full, caption=short)
             changed = True
 
     # 2) day recap
@@ -1402,7 +1414,29 @@ def run_extras(candles, state, now):
                       "-1R means the stop loss was hit, 0R means it closed at break-even."]
         news["recap_date"] = today   # mark first, so a retry or a second run cannot post it twice
         save_news(news)
-        send("\n".join(lines))
+        rows = [("Signals posted today: %d" % len(opened), "head")]
+        kind_of = {"TP2": "win", "TP1": "win", "SL": "loss", "EXPIRED": "flat"}
+        words = {"TP2": "full target hit", "TP1": "half won, rest at break-even", "SL": "stopped out",
+                 "EXPIRED": "expired, no gain or loss"}
+        for t in closed:
+            rows.append((f"{t['side']} {t['pair']}   {t['r']:+.1f}R   {words.get(t['result'], '')}", kind_of.get(t["result"], "info")))
+        if closed:
+            rows.append((f"Closed today: {sum(t['r'] for t in closed):+.1f}R", "head"))
+        if still:
+            rows.append(("Still open: " + ", ".join(f"{t['side']} {t['pair']}" for t in still), "dim"))
+        if not opened and not closed:
+            rows.append(("No setups today. Daily Break only trades a clean breakout of yesterday's high or low "
+                         "that agrees with the trend. No setup means no trade, and that is the plan.", "info"))
+        rows.append(("Daily Break record: " + (f"{w}W / {l}L ({rate:.0f}%) | {r:+.1f}R" if done else "building (no closed trades yet)"), "head"))
+        if closed or opened:
+            rows.append(("R = the amount you risk on a trade. +2R = made double your risk, -1R = stop loss hit, 0R = break-even.", "dim"))
+        total = sum(t["r"] for t in closed)
+        tiles = [("SIGNALS TODAY", str(len(opened)), "info"),
+                 ("CLOSED TODAY", f"{total:+.1f}R" if closed else "none yet", "win" if total > 0 else ("loss" if total < 0 else "flat") if closed else "dim"),
+                 ("DAILY BREAK RECORD", f"{w}W / {l}L" if done else "building", "info")]
+        card_rows = [r_ for r_ in rows if r_[1] != "head"]
+        send_image_or_text(lambda: make_recap_card(f"DAY RECAP · {now.astimezone(WAT):%a %d %b}", card_rows, tiles),
+                           "\n".join(lines), caption=f"📊 <b>{BRAND} DAY RECAP</b> · {now.astimezone(WAT):%a %d %b}")
         changed = True
 
     if changed:
@@ -1839,58 +1873,169 @@ def _plt():
     return plt
 
 
+def _theme():
+    return dict(bg1="#05080f", bg2="#0c1628", panel="#0b1424", edge="#1e3050", fg="#eaf2ff", dim="#7f93b2",
+                up="#00e5a8", down="#ff4d6d", amber="#ffb020", blue="#4da3ff", cyan="#22d3ee",
+                mono="DejaVu Sans Mono", sans="DejaVu Sans")
+
+
+def _canvas(plt, w, h, accent):
+    """Figure with a gradient background and a soft coloured glow in the top-right corner. Drawing units are inches."""
+    from matplotlib.colors import LinearSegmentedColormap, to_rgb
+    t = _theme()
+    fig = plt.figure(figsize=(w, h), dpi=150)
+    bg = fig.add_axes([0, 0, 1, 1])
+    bg.axis("off")
+    grad = np.linspace(1, 0, 256).reshape(-1, 1)
+    bg.imshow(grad, extent=[0, w, 0, h], cmap=LinearSegmentedColormap.from_list("bg", [t["bg2"], t["bg1"]]),
+              aspect="auto", zorder=0)
+    yy, xx = np.mgrid[0:1:160j, 0:1:240j]
+    rr = np.sqrt(((xx - 0.93) * 1.7) ** 2 + (yy - 1.0) ** 2)
+    rgba = np.zeros((160, 240, 4))
+    rgba[..., :3] = to_rgb(accent)
+    rgba[..., 3] = np.clip(1 - rr / 0.95, 0, 1) ** 2 * 0.30
+    bg.imshow(rgba, extent=[0, w, 0, h], aspect="auto", zorder=1, origin="lower")
+    bg.set_xlim(0, w)
+    bg.set_ylim(0, h)
+    return fig, bg, t
+
+
+def _panel(bg, x, y, w, h, t, accent=None, r=0.14):
+    from matplotlib.patches import FancyBboxPatch
+    bg.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}", fc=t["panel"],
+                                ec=t["edge"], lw=1.0, alpha=0.92, zorder=2))
+    if accent:
+        bg.plot([x + r, x + w - r], [y + h, y + h], color=accent, lw=2.2, alpha=0.95, zorder=3, solid_capstyle="round")
+
+
+def _pill(bg, x, y, w, h, color, text, fs=10, tc="#04110d", t=None):
+    from matplotlib.patches import FancyBboxPatch
+    bg.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={h / 2}", fc=color, ec="none", zorder=4))
+    bg.text(x + w / 2, y + h / 2 - 0.005, text, color=tc, fontsize=fs, fontweight="bold", ha="center", va="center",
+            family=(t or _theme())["sans"], zorder=5)
+
+
+def _wordmark(fig, bg, x_right, y, t, accent):
+    """PIP + PULSE wordmark with a little heartbeat line."""
+    p2 = bg.text(x_right, y, "PULSE", color=accent, fontsize=15, fontweight="bold", ha="right", va="center", family=t["sans"], zorder=5)
+    fig.canvas.draw()
+    width = p2.get_window_extent(fig.canvas.get_renderer()).width / fig.dpi
+    p1 = bg.text(x_right - width, y, "PIP", color=t["fg"], fontsize=15, fontweight="bold", ha="right", va="center", family=t["sans"], zorder=5)
+    fig.canvas.draw()
+    w1 = p1.get_window_extent(fig.canvas.get_renderer()).width / fig.dpi
+    x0 = x_right - width - w1 - 0.68
+    xs = [0, 0.10, 0.17, 0.24, 0.31, 0.38, 0.52]
+    ys = [0, 0, 0.13, -0.11, 0.07, 0, 0]
+    bg.plot([x0 + a for a in xs], [y + b for b in ys], color=accent, lw=1.6, zorder=5,
+            path_effects=[_pe().Stroke(linewidth=5, foreground=accent, alpha=0.22), _pe().Normal()])
+
+
+def _pe():
+    import matplotlib.patheffects as pe
+    return pe
+
+
+def _glow(color, w=6, a=0.2):
+    return [_pe().Stroke(linewidth=w, foreground=color, alpha=a), _pe().Normal()]
+
+
+def _card(bg, x, y, w, h, t, label, value, sub, color):
+    _panel(bg, x, y, w, h, t, accent=color, r=0.10)
+    bg.text(x + 0.14, y + h - 0.16, label, color=t["dim"], fontsize=6.8, fontweight="bold", va="center", family=t["sans"], zorder=5)
+    bg.text(x + 0.14, y + h / 2 - 0.03, value, color=color, fontsize=12.5, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    if sub:
+        bg.text(x + 0.14, y + 0.15, sub, color=t["dim"], fontsize=6.8, va="center", family=t["sans"], zorder=5)
+
+
+def _candles(ax, plt, d, t):
+    for i, r in d.reset_index(drop=True).iterrows():
+        col = t["up"] if r["close"] >= r["open"] else t["down"]
+        ax.plot([i, i], [r["low"], r["high"]], color=col, linewidth=0.8, zorder=3, alpha=0.9)
+        lo, hi = min(r["open"], r["close"]), max(r["open"], r["close"])
+        ax.add_patch(plt.Rectangle((i - 0.34, lo), 0.68, max(hi - lo, 1e-9), facecolor=col, edgecolor=col,
+                                   linewidth=0.4, alpha=0.92, zorder=4))
+
+
+def _zone(ax, x0, x1, y_a, y_b, color, strong_at_a):
+    """Gradient-filled box between two prices, strongest next to y_a."""
+    from matplotlib.colors import LinearSegmentedColormap, to_rgb
+    r, g, b = to_rgb(color)
+    cm = LinearSegmentedColormap.from_list("z", [(r, g, b, 0.03), (r, g, b, 0.34)])
+    lo, hi = min(y_a, y_b), max(y_a, y_b)
+    strong_low = (strong_at_a and y_a < y_b) or (not strong_at_a and y_b < y_a)
+    arr = np.linspace(1, 0, 128) if strong_low else np.linspace(0, 1, 128)
+    ax.imshow(arr.reshape(-1, 1), extent=[x0, x1, lo, hi], origin="lower", aspect="auto", cmap=cm, zorder=1)
+
+
+def _style_axes(ax, t):
+    ax.set_facecolor("none")
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.grid(color=t["edge"], linewidth=0.6, alpha=0.55, linestyle=(0, (2, 3)))
+    ax.tick_params(axis="y", colors=t["dim"], labelsize=7, length=0)
+    ax.tick_params(axis="x", colors=t["dim"], labelsize=7, length=0)
+    for lab in ax.get_yticklabels():
+        lab.set_family(t["mono"])
+
+
+def _tag(ax, x, price, text, color, t, fg="#04110d"):
+    ax.text(x, price, text, color=fg, fontsize=7.6, fontweight="bold", va="center", ha="left", family=t["mono"],
+            zorder=9, clip_on=False,
+            bbox=dict(boxstyle="round,pad=0.28,rounding_size=0.5", fc=color, ec="none"))
+
+
 def make_signal_chart(s, df, path="signal_chart.png"):
-    """Candles with entry, stop loss, TP1 and TP2 drawn on them. Returns the file path."""
+    """Neon-on-dark chart: candles, profit/loss zones, glowing entry/SL/TP lines, and a stat strip underneath."""
     plt = _plt()
-    bg, fg, grid = "#0f1722", "#e6edf3", "#243040"
-    up, down, buy_c, sell_c = "#2ebd85", "#f6465d", "#2ebd85", "#f6465d"
+    W, H = 9.0, 5.1
+    side_col = _theme()["up"] if s["side"] == "BUY" else _theme()["down"]
+    fig, bg, t = _canvas(plt, W, H, side_col)
+    # header
+    _pill(bg, 0.35, 4.42, 0.92, 0.38, side_col, s["side"], fs=12, t=t)
+    bg.text(1.45, 4.62, s["pair"], color=t["fg"], fontsize=22, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    bg.text(0.37, 4.2, f"{s['strategy'].upper()}   ·   30M   ·   VIP SIGNAL", color=t["dim"], fontsize=7.6,
+            fontweight="bold", va="center", family=t["sans"], zorder=5)
+    _wordmark(fig, bg, W - 0.4, 4.62, t, side_col)
+    # chart panel
+    _panel(bg, 0.3, 1.62, W - 0.6, 2.42, t)
     d = df.tail(CHART_CANDLES).reset_index(drop=True)
-    n, pad = len(d), 14
-    fig, ax = plt.subplots(figsize=(9, 5.2), dpi=150)
-    fig.patch.set_facecolor(bg)
-    ax.set_facecolor(bg)
-    for i, r in d.iterrows():
-        col = up if r["close"] >= r["open"] else down
-        ax.plot([i, i], [r["low"], r["high"]], color=col, linewidth=0.9, zorder=2)
-        body_lo, body_hi = min(r["open"], r["close"]), max(r["open"], r["close"])
-        ax.add_patch(plt.Rectangle((i - 0.33, body_lo), 0.66, max(body_hi - body_lo, 1e-9),
-                                   facecolor=col, edgecolor=col, zorder=3))
+    n, pad = len(d), 12
+    ax = fig.add_axes([0.62 / W, 1.78 / H, 6.55 / W, 2.1 / H])
+    _style_axes(ax, t)
+    _candles(ax, plt, d, t)
     entry, sl, tp1, tp2 = s["entry"], s["sl"], s["tp1"], s["tp2"]
     x0, x1 = n - 1, n - 1 + pad
-    ax.fill_between([x0, x1], entry, tp2, color=buy_c, alpha=0.10, zorder=1)
-    ax.fill_between([x0, x1], entry, sl, color=sell_c, alpha=0.14, zorder=1)
-    levels = [("TP2", tp2, up, f"1:{s['tp2_r']:g}"), ("TP1", tp1, up, f"1:{s['tp1_r']:g}"),
-              ("ENTRY", entry, fg, ""), ("SL", sl, down, "")]
-    for name, price, col, extra in levels:
-        ax.plot([x0 - 12, x1], [price, price], color=col, linewidth=1.1,
-                linestyle="-" if name == "ENTRY" else "--", zorder=4)
-        label = f"{name} {price:.{len(str(s['entry']).split('.')[-1])}f}" + (f"  ({extra})" if extra else "")
-        ax.text(x1 + 0.4, price, label, color=col, va="center", ha="left", fontsize=8.5, fontweight="bold")
+    _zone(ax, x0, x1, entry, tp2, t["up"], True)
+    _zone(ax, x0, x1, entry, sl, t["down"], True)
+    for price, col, ls, lw in ((tp2, t["up"], (0, (4, 3)), 1.2), (tp1, t["up"], (0, (4, 3)), 1.2),
+                               (entry, t["fg"], "-", 1.4), (sl, t["down"], (0, (4, 3)), 1.2)):
+        ax.plot([x0 - 10, x1], [price, price], color=col, linestyle=ls, linewidth=lw, zorder=6, path_effects=_glow(col, 5, 0.18))
+    ax.scatter([n - 1], [entry], s=230, color=side_col, alpha=0.18, zorder=7)
+    ax.scatter([n - 1], [entry], s=36, color=t["fg"], edgecolor=side_col, linewidth=1.6, zorder=8)
     lows = list(d["low"]) + [sl, entry, tp1, tp2]
     highs = list(d["high"]) + [sl, entry, tp1, tp2]
     span = max(highs) - min(lows)
-    ax.set_ylim(min(lows) - span * 0.06, max(highs) + span * 0.06)
-    ax.set_xlim(-1, x1 + 11)
-    step = max(1, n // 6)
+    ax.set_ylim(min(lows) - span * 0.07, max(highs) + span * 0.07)
+    ax.set_xlim(-1, x1 + 0.2)
+    step = max(1, n // 5)
     ticks = list(range(0, n, step))
     ax.set_xticks(ticks)
-    ax.set_xticklabels([d["datetime"].iloc[i].strftime("%d %b %H:%M") for i in ticks], color=fg, fontsize=7.5)
-    ax.tick_params(axis="y", colors=fg, labelsize=7.5)
-    ax.yaxis.tick_left()
-    ax.grid(color=grid, linewidth=0.5, alpha=0.7)
-    for sp in ax.spines.values():
-        sp.set_color(grid)
-    side_col = buy_c if s["side"] == "BUY" else sell_c
-    arrow = "BUY" if s["side"] == "BUY" else "SELL"
-    fig.text(0.04, 0.945, f"{arrow}  {s['pair']}", color=side_col, fontsize=17, fontweight="bold", va="center")
-    fig.text(0.04, 0.895, f"{s['strategy']}  |  30-minute chart  |  risk {s['risk_pips']} {s['unit']}",
-             color=fg, fontsize=9, va="center", alpha=0.85)
-    fig.text(0.96, 0.945, BRAND, color=fg, fontsize=15, fontweight="bold", va="center", ha="right")
-    fig.text(0.96, 0.895, "VIP SIGNAL", color=fg, fontsize=9, va="center", ha="right", alpha=0.7)
-    fig.text(0.5, 0.012, "Trade at your own risk. Past performance does not guarantee future results.",
-             color=fg, fontsize=7, ha="center", alpha=0.55)
-    fig.subplots_adjust(left=0.07, right=0.80, top=0.86, bottom=0.10)
-    fig.savefig(path, facecolor=bg)
+    ax.set_xticklabels([d["datetime"].iloc[i].strftime("%d %b %H:%M") for i in ticks])
+    dec = len(str(s["entry"]).split(".")[-1])
+    for lab, price, col in (("TP2", tp2, t["up"]), ("TP1", tp1, t["up"]), ("ENTRY", entry, t["fg"]), ("SL", sl, t["down"])):
+        _tag(ax, x1 + 0.7, price, f"{lab} {price:.{dec}f}", col, t)
+    # stat strip
+    cw, gap, y0, ch = (W - 0.6 - 3 * 0.14) / 4, 0.14, 0.52, 0.92
+    unit = s["unit"]
+    cards = [("ENTRY", f"{entry:.{dec}f}", "30-minute close", t["fg"]),
+             ("STOP LOSS", f"{sl:.{dec}f}", f"-{s['risk_pips']} {unit}", t["down"]),
+             ("TP1  ·  1:%g" % s["tp1_r"], f"{tp1:.{dec}f}", f"+{round(s['risk_pips'] * s['tp1_r'], 1)} {unit}", t["up"]),
+             ("TP2  ·  1:%g" % s["tp2_r"], f"{tp2:.{dec}f}", f"+{round(s['risk_pips'] * s['tp2_r'], 1)} {unit}", t["up"])]
+    for k, (lab, val, sub, col) in enumerate(cards):
+        _card(bg, 0.3 + k * (cw + gap), y0, cw, ch, t, lab, val, sub, col)
+    bg.text(W / 2, 0.24, "Risk 1% max per trade  ·  At TP1 close half and move your stop to entry  ·  Trade at your own risk",
+            color=t["dim"], fontsize=6.6, ha="center", va="center", family=t["sans"], zorder=5)
+    fig.savefig(path, facecolor=t["bg1"])
     plt.close(fig)
     return path
 
@@ -1921,6 +2066,106 @@ def send_signal(sig, text, df):
     send(text)
 
 
+# ---------- Images: levels chart, recap card, test chart ----------
+def make_levels_chart(panels, title, path="levels_chart.png"):
+    """One glass panel per pair: candles, yesterday's high/low, and what the bot is waiting for."""
+    plt = _plt()
+    n_p = len(panels)
+    W, ph = 9.0, 2.75
+    H = 1.35 + ph * n_p + 0.15
+    fig, bg, t = _canvas(plt, W, H, _theme()["cyan"])
+    _pill(bg, 0.35, H - 0.72, 2.0, 0.38, t["cyan"], "LEVELS TO WATCH", fs=10, t=t)
+    bg.text(2.55, H - 0.53, title.split("·")[-1].strip(), color=t["fg"], fontsize=12, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    _wordmark(fig, bg, W - 0.4, H - 0.53, t, t["cyan"])
+    state_style = {"up": ("TREND UP", t["up"]), "down": ("TREND DOWN", t["down"]),
+                   "none": ("NO CLEAR TREND", t["amber"]), "broke": ("ALREADY BROKE OUT", t["dim"])}
+    for k, p in enumerate(panels):
+        top = H - 1.0 - k * ph
+        y0 = top - ph + 0.15
+        _panel(bg, 0.3, y0, W - 0.6, ph - 0.2, t)
+        label, col = state_style[p["state"]]
+        bg.text(0.55, top - 0.22, p["name"], color=t["fg"], fontsize=13, fontweight="bold", va="center", family=t["mono"], zorder=5)
+        _pill(bg, 1.95, top - 0.37, 1.55, 0.3, col, label, fs=7.5, tc="#06101c", t=t)
+        bg.text(3.7, top - 0.22, p["watch"], color=t["dim"], fontsize=8, va="center", family=t["sans"], zorder=5)
+        d = p["df"].tail(60).reset_index(drop=True)
+        m = len(d)
+        ax = fig.add_axes([0.62 / W, (y0 + 0.12) / H, 6.55 / W, (ph - 0.2 - 0.62) / H])
+        _style_axes(ax, t)
+        _candles(ax, plt, d, t)
+        for price, name, c2, hot in ((p["hi"], "HIGH", t["up"], p["state"] == "up"), (p["lo"], "LOW", t["down"], p["state"] == "down")):
+            ax.plot([-1, m + 6], [price, price], color=c2, linestyle="-" if hot else (0, (4, 3)),
+                    linewidth=1.8 if hot else 1.1, zorder=6, path_effects=_glow(c2, 7 if hot else 4, 0.25 if hot else 0.15))
+            _tag(ax, m + 7.0, price, f"{name} {price:.{p['dec']}f}", c2, t)
+        lows, highs = list(d["low"]) + [p["lo"]], list(d["high"]) + [p["hi"]]
+        span = max(highs) - min(lows)
+        ax.set_ylim(min(lows) - span * 0.08, max(highs) + span * 0.08)
+        ax.set_xlim(-1, m + 6.5)
+        ax.set_xticks([])
+    bg.text(W / 2, 0.12, "No breakout means no trade. Waiting is part of the plan.", color=t["dim"], fontsize=7.4,
+            ha="center", va="center", family=t["sans"], zorder=5)
+    fig.savefig(path, facecolor=t["bg1"])
+    plt.close(fig)
+    return path
+
+
+def make_recap_card(title, rows, tiles, path="recap_card.png"):
+    """Stat tiles on top, one coloured line per closed trade, and small notes underneath."""
+    import textwrap
+    plt = _plt()
+    colors = {"win": "up", "loss": "down", "flat": "amber", "info": "fg", "dim": "dim"}
+    t0 = _theme()
+    lines = []
+    for text, kind in rows:
+        for part in (textwrap.wrap(text, 70) or [""]):
+            lines.append((part, kind))
+    W = 8.2
+    H = 2.6 + 0.36 * len(lines)
+    fig, bg, t = _canvas(plt, W, H, t0["cyan"])
+    _pill(bg, 0.35, H - 0.72, 1.55, 0.38, t["cyan"], "DAY RECAP", fs=10, t=t)
+    bg.text(2.1, H - 0.53, title.split("·")[-1].strip(), color=t["fg"], fontsize=12, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    _wordmark(fig, bg, W - 0.4, H - 0.53, t, t["cyan"])
+    cw, gap = (W - 0.6 - (len(tiles) - 1) * 0.14) / len(tiles), 0.14
+    for k, (lab, val, kind) in enumerate(tiles):
+        _card(bg, 0.3 + k * (cw + gap), H - 1.95, cw, 0.95, t, lab, val, "", t[colors.get(kind, "fg")])
+    y = H - 2.3
+    for text, kind in lines:
+        bg.text(0.45, y, text, color=t[colors.get(kind, "fg")], fontsize=9.5 if kind in ("win", "loss", "flat") else 8.6,
+                fontweight="bold" if kind in ("win", "loss", "flat") else "normal", va="center", family=t["mono"] if kind in ("win", "loss", "flat") else t["sans"], zorder=5)
+        y -= 0.36
+    fig.savefig(path, facecolor=t["bg1"])
+    plt.close(fig)
+    return path
+
+
+def send_image_or_text(make_image, text, caption=None):
+    """Try to post a picture (caption defaults to the full text). If anything fails, post the plain text."""
+    if CHARTS:
+        try:
+            path = make_image()
+            cap = text if caption is None else caption
+            if len(cap) <= 1000:
+                send_photo(path, cap)
+            else:
+                send_photo(path)
+                send(cap)
+            return
+        except Exception as e:
+            print(f"Image failed, sending text only: {str(e)[:150]}")
+    send(text)
+
+
+def run_test_chart():
+    """Posts a clearly labelled TEST chart built from real recent prices, to check the picture pipeline."""
+    inst = next(i for i in INSTRUMENTS if i["name"] == "EUR/USD")
+    df = add_indicators(fetch_twelvedata(inst["symbol"], LIVE_COUNT, LIVE_INTERVAL, LIVE_MINUTES * 60))
+    last = df.iloc[-1]
+    entry, atr = float(last.close), float(last.atr)
+    sig = build_signal(inst, "TEST", "BUY", entry, entry - 1.5 * atr, last.datetime)
+    path = make_signal_chart(sig, df, "test_chart.png")
+    send_photo(path, "🧪 <b>TEST CHART</b>: this is NOT a real signal. It only checks that chart images work.")
+    print("Test chart sent.")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -1932,6 +2177,9 @@ def main():
         return
     if "--sweep" in sys.argv:
         run_sweep()
+        return
+    if "--test-chart" in sys.argv:
+        run_test_chart()
         return
     if "--news-repost" in sys.argv:   # testing only: ignores the once-a-day rules, so it can post duplicates
         run_news_safe(force=True, repost=True)
