@@ -25,19 +25,6 @@
       "candle": "2026-10-05T11:00:00",
       "opened_at": "2026-10-05T12:30:54.035101+00:00",
       "live": false
-    },
-    {
-      "pair": "Volatility 25 (1s)",
-      "strategy": "Price Action",
-      "side": "SELL",
-      "entry": 853572.18,
-      "sl": 859498.2894,
-      "tp": 829867.7422,
-      "risk_pips": 5926.1,
-      "unit": "pts",
-      "candle": "2026-10-05T21:00:00",
-      "opened_at": "2026-10-05T22:22:52.114718+00:00",
-      "live": true
     }
   ],
   "closed": [
@@ -88,6 +75,22 @@
       "result": "SL",
       "r": -1.0,
       "closed_at": "2026-10-05T08:27:33.947747+00:00"
+    },
+    {
+      "pair": "Volatility 25 (1s)",
+      "strategy": "Price Action",
+      "side": "SELL",
+      "entry": 853572.18,
+      "sl": 859498.2894,
+      "tp": 829867.7422,
+      "risk_pips": 5926.1,
+      "unit": "pts",
+      "candle": "2026-10-05T21:00:00",
+      "opened_at": "2026-10-05T22:22:52.114718+00:00",
+      "live": true,
+      "result": "EXPIRED",
+      "r": 0.0,
+      "closed_at": "2026-10-06T01:21:01.486913+00:00"
     }
   ],
   "last_signal": {
@@ -97,7 +100,7 @@
     "Price Action|Volatility 25 (1s)": "2026-10-05T21:00:00"
   },
   "paused": {
-    "EMA Cross|AUD/USD": false,
+    "EMA Cross|AUD/USD": true,
     "EMA Cross|USD/CAD": false,
     "EMA Cross|Volatility 75": false,
     "EMA Cross|Volatility 75 (1s)": false,
@@ -109,6 +112,8 @@
     "Price Action|Volatility 25 (1s)": false,
     "Price Action|Volatility 100": false,
     "Price Action|Volatility 100 (1s)": false,
-    "Price Action|Volatility 90 (1s)": false
+    "Price Action|Volatility 90 (1s)": false,
+    "EMA Cross|XAU/USD": false,
+    "Price Action|XAU/USD": false
   }
 }
