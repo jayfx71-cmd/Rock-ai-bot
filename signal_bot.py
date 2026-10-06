@@ -1120,6 +1120,84 @@ def event_line(e):
     return f"• {e['time'].astimezone(WAT):%H:%M} {flag} {e['ccy']} {html.escape(e['title'])}{html.escape(tail)}"
 
 
+# ---------- Plain-English explanations ----------
+import re
+
+EVENT_HELP = [  # (pattern in the event title, what it is, how price usually reacts) - first match wins
+    (r"non-farm|nfp", "US jobs report: how many new jobs America added last month.",
+     "More jobs than expected usually lifts the dollar. Fewer jobs does the opposite."),
+    (r"adp", "A private jobs count that hints at what the official US jobs report will say.",
+     "More jobs than expected usually helps the dollar."),
+    (r"unemployment claims|jobless claims|claimant", "How many people applied for unemployment help. A HIGHER number is bad news for the economy.",
+     "Higher than expected usually weakens the currency."),
+    (r"unemployment rate", "The share of people without a job. LOWER is better.",
+     "Lower than expected usually strengthens the currency."),
+    (r"employment change|jobs", "How many jobs the economy added or lost.",
+     "More jobs than expected usually strengthens the currency."),
+    (r"average hourly earnings|wage", "How fast pay is rising. Faster pay can keep inflation high.",
+     "Higher than expected can strengthen the currency because rates may stay high."),
+    (r"core pce|pce", "The inflation number the US Federal Reserve watches most closely.",
+     "Hotter inflation than expected usually lifts the dollar (rates stay high). Cooler inflation weakens it."),
+    (r"cpi|inflation", "Inflation: how fast prices are rising. Central banks raise rates to fight it.",
+     "Higher than expected usually lifts the currency (rates may stay high). Lower usually weakens it."),
+    (r"ppi", "What producers pay for goods. It often shows up in shop prices later.",
+     "Higher than expected can lift the currency, like inflation."),
+    (r"fomc.*(statement|rate)|federal funds|fed.*rate", "The US central bank (the Fed) announces its interest rate.",
+     "Higher rates or a firm tone usually lift the dollar. Cuts or a soft tone weaken it. The wording matters as much as the number."),
+    (r"fomc.*minutes|minutes", "Notes from the last central bank meeting that show what they were thinking.",
+     "Markets look for hints about future rate moves."),
+    (r"press conference|speaks|speech|testif", "The central bank boss is talking. Traders hunt for hints about interest rates.",
+     "A firm tone usually lifts the currency. A soft tone weakens it. Sudden swings are common."),
+    (r"rate statement|rate decision|official bank rate|cash rate|main refinancing|policy rate|overnight rate|boj|boe|ecb|rba|boc", "A central bank announces its interest rate.",
+     "Higher rates or a firm tone usually lift the currency. Cuts or a soft tone weaken it. A surprise moves price the most."),
+    (r"gdp", "How fast the whole economy is growing.",
+     "Stronger than expected usually lifts the currency."),
+    (r"retail sales", "How much shoppers are spending. Spending drives most economies.",
+     "Higher than expected usually strengthens the currency."),
+    (r"pmi|ism", "A survey of business managers. Above 50 means the sector is growing.",
+     "Higher than expected usually strengthens the currency."),
+    (r"consumer (sentiment|confidence)|uom|zew|sentiment", "A survey of how confident people feel about the economy.",
+     "Better than expected usually helps the currency."),
+    (r"trade balance", "Exports minus imports. More exports than imports is good for a currency.",
+     "Better than expected usually helps the currency."),
+    (r"jolts|job openings", "How many jobs employers are trying to fill.",
+     "Higher than expected usually helps the dollar."),
+]
+
+HEADLINE_HELP = [  # (words in a headline, one plain line about why it can matter)
+    (r"\b(fed|powell|fomc)\b", "The Fed sets US interest rates. Higher-for-longer usually lifts the dollar. Cuts usually weaken it."),
+    (r"\b(ecb|lagarde)\b", "The ECB sets euro rates. Higher rates usually lift the euro."),
+    (r"\b(boe|bank of england|bailey)\b", "The Bank of England sets UK rates. Higher rates usually lift the pound."),
+    (r"\b(boj|bank of japan|yen)\b", "Japan keeps rates very low, so the yen moves on any hint of change. Nervous markets often buy yen."),
+    (r"\b(rba|reserve bank of australia)\b", "The RBA sets Australian rates. Higher rates usually lift the Australian dollar."),
+    (r"\b(inflation|cpi|pce)\b", "Hot inflation can keep interest rates high, which usually lifts that currency."),
+    (r"\b(payrolls|jobs report|unemployment|jobless)\b", "Strong jobs data usually lifts a currency. Weak jobs data usually weakens it."),
+    (r"\b(gold|bullion)\b", "Gold often rises when the dollar falls or when investors feel nervous."),
+    (r"\b(oil|crude|opec|brent)\b", "Oil moves inflation and currencies like the Canadian dollar, which sells a lot of oil."),
+    (r"\b(tariff|trade war|sanction)\b", "Trade fights can rattle markets. Safe havens like the dollar, yen and gold often rise."),
+    (r"\b(war|attack|missile|geopolit|conflict)\b", "Fear usually sends money into safe havens like the dollar, yen and gold."),
+    (r"\b(dollar|dxy|greenback)\b", "Gold and the euro usually move the opposite way to the dollar."),
+    (r"\b(rate cut|rate hike|interest rate|rates)\b", "Higher interest rates usually attract money into a currency. Lower rates usually push it out."),
+]
+
+
+def explain_event(e):
+    title = e["title"].lower()
+    for pattern, what, effect in EVENT_HELP:
+        if re.search(pattern, title):
+            gold = " Gold usually moves the opposite way to the dollar." if e["ccy"] == "USD" else ""
+            return f"   <i>{html.escape(what)} {html.escape(effect)}{gold}</i>"
+    return ""
+
+
+def explain_headline(title):
+    t = title.lower()
+    for pattern, line in HEADLINE_HELP:
+        if re.search(pattern, t):
+            return f"\n💡 <i>In plain words: {html.escape(line)}</i>"
+    return ""
+
+
 def fetch_headlines():
     """Newest headlines from the free RSS feeds. Headline + link only."""
     per_feed = []
@@ -1164,8 +1242,14 @@ def run_news(force=False):
             lines = [f"🗞 <b>{BRAND} MORNING BRIEF</b> · {local:%a %d %b}", ""]
             if todays:
                 lines.append("High-impact releases today (Nigeria time):")
-                lines += [event_line(e) for e in todays]
-                lines += ["", f"Prices can jump around these. We pause new signals on the pairs involved "
+                for e in todays:
+                    lines.append(event_line(e))
+                    ex = explain_event(e)
+                    if ex:
+                        lines.append(ex)
+                lines += ["", "📘 <b>How to read this:</b> 'forecast' is what experts expect. Price moves on the SURPRISE: "
+                          "the further the real number is from the forecast, the bigger the move.",
+                          "", f"Prices can jump around these. We pause new signals on the pairs involved "
                           f"from {BLACKOUT_BEFORE_MIN} min before to {BLACKOUT_AFTER_MIN} min after each release."]
             else:
                 lines.append("No high-impact releases on the major currencies today. A quieter day.")
@@ -1178,7 +1262,7 @@ def run_news(force=False):
                 pairs = ", ".join(affected_pairs(e)) or e["ccy"]
                 extra = ("NFP is the biggest mover of the month, so expect wild swings. "
                          if is_nfp(e) else "")
-                send(f"⚠️ <b>High-impact news in about {int(mins)} min</b>\n{event_line(e)}\n\n"
+                send(f"⚠️ <b>High-impact news in about {int(mins)} min</b>\n{event_line(e)}\n{explain_event(e)}\n\n"
                      f"{extra}Spreads widen and price can jump, so we are NOT trading it. "
                      f"New signals on {pairs} are paused until {until:%H:%M} (Nigeria time).")
                 news["alerted"].append(e["id"])
@@ -1194,7 +1278,7 @@ def run_news(force=False):
         for h in fresh:
             if posted >= HEADLINES_PER_RUN or news["day_count"] >= HEADLINES_PER_DAY:
                 break
-            send(f"📰 <b>Market Pulse</b> ({h['source']})\n{html.escape(h['title'])}\n{h['link']}")
+            send(f"📰 <b>Market Pulse</b> ({h['source']})\n{html.escape(h['title'])}{explain_headline(h['title'])}\n{h['link']}")
             posted += 1
             news["day_count"] += 1
         # remember everything we saw, so an old backlog never drips out later
