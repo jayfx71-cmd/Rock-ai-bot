@@ -114,7 +114,9 @@ BLACKOUT_AFTER_MIN = 90        # ... until this long after it, on the pairs that
 NFP_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD"]   # pairs used by the --nfp test
 NFP_PAGES = 7                  # pages of 5000 H1 candles to fetch for the --nfp test (about 5 years)
 NFP_FILE = Path("state/nfp.txt")
-HEADLINES_PER_RUN = 3
+HEADLINES_PER_RUN = 1       # one headline at a time, never a burst
+HEADLINE_GAP_MIN = 40        # and at least this many minutes between two headlines
+HEADLINE_MAX_AGE_H = 18      # skip headlines older than this
 HEADLINES_PER_DAY = 12
 STATE_FILE = Path("state/signals.json")
 BACKTEST_FILE = Path("state/backtest.json")
@@ -1062,6 +1064,7 @@ def load_news():
     news.setdefault("lesson_idx", 0)
     news.setdefault("levels_date", "")
     news.setdefault("recap_date", "")
+    news.setdefault("last_headline", "")
     return news
 
 
@@ -1216,7 +1219,13 @@ def fetch_headlines():
                 title = (item.findtext("title") or "").strip()
                 link = (item.findtext("link") or "").strip()
                 if title and link:
-                    items.append({"source": name, "title": title, "link": link})
+                    ts = None
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        ts = parsedate_to_datetime(item.findtext("pubDate") or "").astimezone(timezone.utc)
+                    except Exception:
+                        pass
+                    items.append({"source": name, "title": title, "link": link, "ts": ts})
         except Exception as e:
             print(f"News feed {name} unavailable: {str(e)[:100]}")
         per_feed.append(items[:15])
@@ -1294,16 +1303,24 @@ def run_news(force=False, repost=False):
         items = fetch_headlines()
         first_run = not news["seen"]
         fresh = [h for h in items if repost or h["link"] not in news["seen"]]
+        fresh = [h for h in fresh if not h.get("ts") or (now - h["ts"]).total_seconds() < HEADLINE_MAX_AGE_H * 3600]
+        try:
+            last = datetime.fromisoformat(news["last_headline"]) if news["last_headline"] else None
+        except Exception:
+            last = None
+        waited_enough = repost or last is None or (now - last).total_seconds() >= HEADLINE_GAP_MIN * 60
         posted = 0
         for h in fresh:
-            if posted >= HEADLINES_PER_RUN or (news["day_count"] >= HEADLINES_PER_DAY and not repost):
+            if not waited_enough or posted >= HEADLINES_PER_RUN or (news["day_count"] >= HEADLINES_PER_DAY and not repost):
                 break
-            send(f"📰 <b>Market Pulse</b> ({h['source']})\n{html.escape(h['title'])}{explain_headline(h['title'])}\n{h['link']}")
+            send(f"📰 <b>Market Pulse</b> ({h['source']})\n{html.escape(h['title'])}{explain_headline(h['title'])}\n"
+                 f"<a href=\"{html.escape(h['link'], quote=True)}\">Read more →</a>")
             posted += 1
             news["day_count"] += 1
-        # remember everything we saw, so an old backlog never drips out later
-        news["seen"] += [h["link"] for h in fresh]
-        if first_run:
+            news["last_headline"] = now.isoformat()
+            news["seen"].append(h["link"])
+        if first_run:   # a brand new install: do not drip out the old backlog later
+            news["seen"] += [h["link"] for h in fresh]
             print(f"News: first run, posted {posted} headline(s) and marked the rest as seen.")
     save_news(news)
 
