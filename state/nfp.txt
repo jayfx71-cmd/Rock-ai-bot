@@ -1,0 +1,19 @@
+==== NFP TEST (R = multiples of the amount risked) ====
+After each NFP the bot looks at the first hour's move (must be at least half an ATR) and either
+FOLLOWS it or FADES it. Stop = 1.5 ATR. Half closes at TP1, stop to entry, rest runs to TP2.
+Pairs: EUR/USD, GBP/USD, USD/JPY, XAU/USD. Usable releases per pair: EUR/USD 56, GBP/USD 54, USD/JPY 55, XAU/USD 52
+'t' says how real the result is (under 2 = could easily be luck). 'good' needs t of 2.5+, positive in BOTH the
+earlier 70% and later 30% of releases, and 30+ releases.
+
+rule              TP1/TP2 trades  win%  total R  R/trade     t  early R   late R
+follow the move  1/1.5       217    41    -32.3    -0.15  -1.6    -31.0     -1.3
+follow the move  1/2         217    41    -33.2    -0.15  -1.8    -28.0     -5.2
+follow the move  2/3         217    30    -24.6    -0.11  -1.4    -18.1     -6.4
+follow the move  3/4         217    29     -7.2    -0.03  -0.7     -2.2     -5.0
+fade the move    1/1.5       217    55    +25.0    +0.12   1.3    +26.0     -1.0
+fade the move    1/2         217    55    +26.3    +0.12   1.3    +26.9     -0.6
+fade the move    2/3         217    37    +18.3    +0.08   0.5    +22.7     -4.3
+fade the move    3/4         217    33    +14.1    +0.06   0.1    +26.0    -11.9
+
+Spreads and slippage are NOT included, and they are large around NFP. Only a clear, consistent 'good'
+result (with neighbouring rows looking similar) would justify trading NFP.
