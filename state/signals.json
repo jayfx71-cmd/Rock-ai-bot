@@ -117,6 +117,11 @@
     "Price Action|Volatility 100 (1s)": false,
     "Price Action|Volatility 90 (1s)": false,
     "EMA Cross|XAU/USD": false,
-    "Price Action|XAU/USD": false
+    "Price Action|XAU/USD": false,
+    "London Breakout|EUR/USD": false,
+    "London Breakout|GBP/USD": false,
+    "London Breakout|USD/JPY": false,
+    "London Breakout|USD/CAD": true,
+    "London Breakout|XAU/USD": false
   }
 }
