@@ -2,7 +2,7 @@ name: Forex signals
 
 on:
   schedule:
-    - cron: "5 * * * 1-5"   # 5 minutes past every hour, Mon-Fri (UTC)
+    - cron: "5,35 * * * 1-5"   # 5 and 35 minutes past every hour, Mon-Fri (UTC)
   workflow_dispatch:
     inputs:
       test:
@@ -46,4 +46,10 @@ jobs:
           git config user.name "signal-bot"
           git config user.email "signal-bot@users.noreply.github.com"
           git add -A state
-          git diff --staged --quiet || (git commit -m "Update signal state" && git push)
+          if git diff --staged --quiet; then exit 0; fi
+          git commit -m "Update signal state"
+          for i in 1 2 3; do
+            if git pull --rebase && git push; then exit 0; fi
+            sleep 5
+          done
+          exit 1
