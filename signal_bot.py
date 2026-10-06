@@ -1097,7 +1097,8 @@ def fetch_headlines():
 def run_news(force=False):
     news = load_news()
     now = datetime.now(timezone.utc)
-    today = now.strftime("%Y-%m-%d")
+    local = now.astimezone(WAT)          # dates shown to subscribers use Nigeria time
+    today = local.strftime("%Y-%m-%d")
 
     # 1) calendar: morning brief + "big news soon" warnings
     try:
@@ -1107,10 +1108,10 @@ def run_news(force=False):
         print(f"Calendar unavailable: {str(e)[:100]}")
     if events is not None:
         CURRENT_EVENTS[:] = events
-        todays = [e for e in events if e["time"].strftime("%Y-%m-%d") == today]
+        todays = [e for e in events if e["time"].astimezone(WAT).strftime("%Y-%m-%d") == today]
         brief_due = force or (now.weekday() < 5 and BRIEF_HOUR_UTC <= now.hour < 20)
         if brief_due and news["brief_date"] != today:
-            lines = [f"🗞 <b>{BRAND} MORNING BRIEF</b> · {now:%a %d %b}", ""]
+            lines = [f"🗞 <b>{BRAND} MORNING BRIEF</b> · {local:%a %d %b}", ""]
             if todays:
                 lines.append("High-impact releases today (Nigeria time):")
                 lines += [event_line(e) for e in todays]
@@ -1143,7 +1144,7 @@ def run_news(force=False):
         for h in fresh:
             if posted >= HEADLINES_PER_RUN or news["day_count"] >= HEADLINES_PER_DAY:
                 break
-            send(f"📰 <b>Market news</b> ({h['source']})\n{html.escape(h['title'])}\n{h['link']}")
+            send(f"📰 <b>Market Pulse</b> ({h['source']})\n{html.escape(h['title'])}\n{h['link']}")
             posted += 1
             news["day_count"] += 1
         # remember everything we saw, so an old backlog never drips out later
