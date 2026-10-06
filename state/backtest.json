@@ -4,10 +4,10 @@
     "wins": 13,
     "win_rate": 21.3,
     "r": -4.5,
-    "first_70_r": -14.5,
-    "first_70_n": 46,
-    "last_30_r": 10.0,
-    "last_30_n": 15
+    "first_70_r": -11.0,
+    "first_70_n": 47,
+    "last_30_r": 6.5,
+    "last_30_n": 14
   },
   "EMA Cross|EUR/USD": {
     "n": 61,
@@ -59,75 +59,155 @@
     "last_30_r": -13.0,
     "last_30_n": 22
   },
-  "EMA Cross|Volatility 100": {
-    "n": 22,
-    "wins": 1,
-    "win_rate": 4.5,
-    "r": -17.5,
-    "first_70_r": -9.5,
-    "first_70_n": 14,
-    "last_30_r": -8.0,
-    "last_30_n": 8
+  "EMA Cross|XAU/USD": {
+    "n": 59,
+    "wins": 13,
+    "win_rate": 22.0,
+    "r": -10.5,
+    "first_70_r": -10.5,
+    "first_70_n": 43,
+    "last_30_r": 0.0,
+    "last_30_n": 16
   },
-  "EMA Cross|Volatility 100 (1s)": {
-    "n": 13,
-    "wins": 3,
-    "win_rate": 23.1,
-    "r": 0.5,
-    "first_70_r": 3.5,
-    "first_70_n": 10,
-    "last_30_r": -3.0,
-    "last_30_n": 3
+  "London Breakout|AUD/USD": {
+    "n": 82,
+    "wins": 35,
+    "win_rate": 42.7,
+    "r": -9.5,
+    "first_70_r": -13.0,
+    "first_70_n": 64,
+    "last_30_r": 3.5,
+    "last_30_n": 18
   },
-  "EMA Cross|Volatility 25": {
-    "n": 18,
-    "wins": 2,
-    "win_rate": 11.1,
-    "r": -11.0,
-    "first_70_r": -6.0,
-    "first_70_n": 13,
-    "last_30_r": -5.0,
-    "last_30_n": 5
+  "London Breakout|EUR/USD": {
+    "n": 100,
+    "wins": 61,
+    "win_rate": 61.0,
+    "r": 12.5,
+    "first_70_r": 6.5,
+    "first_70_n": 68,
+    "last_30_r": 6.0,
+    "last_30_n": 32
   },
-  "EMA Cross|Volatility 25 (1s)": {
-    "n": 18,
-    "wins": 2,
-    "win_rate": 11.1,
-    "r": -11.0,
-    "first_70_r": -3.0,
-    "first_70_n": 10,
-    "last_30_r": -8.0,
-    "last_30_n": 8
+  "London Breakout|GBP/JPY": {
+    "n": 96,
+    "wins": 44,
+    "win_rate": 45.8,
+    "r": -7.0,
+    "first_70_r": -4.5,
+    "first_70_n": 69,
+    "last_30_r": -2.5,
+    "last_30_n": 27
   },
-  "EMA Cross|Volatility 75": {
-    "n": 12,
-    "wins": 4,
-    "win_rate": 33.3,
-    "r": 4.0,
-    "first_70_r": -1.0,
-    "first_70_n": 8,
-    "last_30_r": 5.0,
-    "last_30_n": 4
+  "London Breakout|GBP/USD": {
+    "n": 117,
+    "wins": 64,
+    "win_rate": 54.7,
+    "r": 14.0,
+    "first_70_r": 15.0,
+    "first_70_n": 80,
+    "last_30_r": -1.0,
+    "last_30_n": 37
   },
-  "EMA Cross|Volatility 75 (1s)": {
-    "n": 16,
-    "wins": 5,
-    "win_rate": 31.2,
-    "r": 2.5,
-    "first_70_r": -0.5,
-    "first_70_n": 12,
+  "London Breakout|USD/CAD": {
+    "n": 124,
+    "wins": 59,
+    "win_rate": 47.6,
+    "r": -4.5,
+    "first_70_r": -5.5,
+    "first_70_n": 90,
+    "last_30_r": 1.0,
+    "last_30_n": 34
+  },
+  "London Breakout|USD/JPY": {
+    "n": 77,
+    "wins": 42,
+    "win_rate": 54.5,
+    "r": 6.0,
+    "first_70_r": 0.5,
+    "first_70_n": 52,
+    "last_30_r": 5.5,
+    "last_30_n": 25
+  },
+  "London Breakout|XAU/USD": {
+    "n": 50,
+    "wins": 35,
+    "win_rate": 70.0,
+    "r": 22.5,
+    "first_70_r": 12.5,
+    "first_70_n": 33,
+    "last_30_r": 10.0,
+    "last_30_n": 17
+  },
+  "Mean Reversion|AUD/USD": {
+    "n": 205,
+    "wins": 114,
+    "win_rate": 55.6,
+    "r": 23.8,
+    "first_70_r": 18.2,
+    "first_70_n": 146,
+    "last_30_r": 5.5,
+    "last_30_n": 59
+  },
+  "Mean Reversion|EUR/USD": {
+    "n": 218,
+    "wins": 106,
+    "win_rate": 48.6,
+    "r": -5.0,
+    "first_70_r": -4.0,
+    "first_70_n": 157,
+    "last_30_r": -1.0,
+    "last_30_n": 61
+  },
+  "Mean Reversion|GBP/JPY": {
+    "n": 180,
+    "wins": 104,
+    "win_rate": 57.8,
+    "r": 27.8,
+    "first_70_r": 24.8,
+    "first_70_n": 120,
     "last_30_r": 3.0,
-    "last_30_n": 4
+    "last_30_n": 60
   },
-  "EMA Cross|Volatility 90 (1s)": {
-    "n": 17,
-    "wins": 1,
-    "win_rate": 5.9,
-    "r": -12.5,
-    "first_70_r": -6.5,
-    "first_70_n": 11,
-    "last_30_r": -6.0,
-    "last_30_n": 6
+  "Mean Reversion|GBP/USD": {
+    "n": 203,
+    "wins": 102,
+    "win_rate": 50.2,
+    "r": 2.5,
+    "first_70_r": 10.5,
+    "first_70_n": 144,
+    "last_30_r": -8.0,
+    "last_30_n": 59
+  },
+  "Mean Reversion|USD/CAD": {
+    "n": 219,
+    "wins": 111,
+    "win_rate": 50.7,
+    "r": -4.5,
+    "first_70_r": -6.2,
+    "first_70_n": 154,
+    "last_30_r": 1.8,
+    "last_30_n": 65
+  },
+  "Mean Reversion|USD/JPY": {
+    "n": 182,
+    "wins": 92,
+    "win_rate": 50.5,
+    "r": 4.0,
+    "first_70_r": -7.8,
+    "first_70_n": 124,
+    "last_30_r": 11.8,
+    "last_30_n": 58
+  },
+  "Mean Reversion|XAU/USD": {
+    "n": 163,
+    "wins": 80,
+    "win_rate": 49.1,
+    "r": -1.0,
+    "first_70_r": 3.8,
+    "first_70_n": 108,
+    "last_30_r": -4.8,
+    "last_30_n": 55
   },
   "Price Action|AUD/USD": {
     "n": 41,
@@ -180,83 +260,23 @@
     "last_30_n": 9
   },
   "Price Action|USD/JPY": {
-    "n": 26,
+    "n": 27,
     "wins": 6,
-    "win_rate": 23.1,
-    "r": -1.0,
-    "first_70_r": 0.5,
-    "first_70_n": 20,
-    "last_30_r": -1.5,
-    "last_30_n": 6
-  },
-  "Price Action|Volatility 100": {
-    "n": 7,
-    "wins": 1,
-    "win_rate": 14.3,
-    "r": -4.5,
-    "first_70_r": -1.5,
-    "first_70_n": 4,
-    "last_30_r": -3.0,
-    "last_30_n": 3
-  },
-  "Price Action|Volatility 100 (1s)": {
-    "n": 12,
-    "wins": 3,
-    "win_rate": 25.0,
-    "r": 1.5,
-    "first_70_r": -1.0,
-    "first_70_n": 10,
-    "last_30_r": 2.5,
-    "last_30_n": 2
-  },
-  "Price Action|Volatility 25": {
-    "n": 9,
-    "wins": 2,
     "win_rate": 22.2,
     "r": -2.0,
-    "first_70_r": -1.0,
-    "first_70_n": 8,
-    "last_30_r": -1.0,
-    "last_30_n": 1
+    "first_70_r": 0.5,
+    "first_70_n": 20,
+    "last_30_r": -2.5,
+    "last_30_n": 7
   },
-  "Price Action|Volatility 25 (1s)": {
-    "n": 9,
-    "wins": 3,
-    "win_rate": 33.3,
-    "r": 2.5,
-    "first_70_r": 3.5,
-    "first_70_n": 8,
-    "last_30_r": -1.0,
-    "last_30_n": 1
-  },
-  "Price Action|Volatility 75": {
-    "n": 6,
-    "wins": 1,
-    "win_rate": 16.7,
-    "r": -1.5,
-    "first_70_r": 2.5,
-    "first_70_n": 2,
-    "last_30_r": -4.0,
+  "Price Action|XAU/USD": {
+    "n": 23,
+    "wins": 8,
+    "win_rate": 34.8,
+    "r": 9.0,
+    "first_70_r": 8.5,
+    "first_70_n": 19,
+    "last_30_r": 0.5,
     "last_30_n": 4
-  },
-  "Price Action|Volatility 75 (1s)": {
-    "n": 5,
-    "wins": 1,
-    "win_rate": 20.0,
-    "r": -2.5,
-    "first_70_r": -1.5,
-    "first_70_n": 4,
-    "last_30_r": -1.0,
-    "last_30_n": 1
-  },
-  "Price Action|Volatility 90 (1s)": {
-    "n": 6,
-    "wins": 1,
-    "win_rate": 16.7,
-    "r": -1.5,
-    "first_70_r": -1.5,
-    "first_70_n": 6,
-    "last_30_r": 0,
-    "last_30_n": 0
   }
 }
