@@ -1358,6 +1358,226 @@ def run_tf():
     TF_FILE.write_text(text + "\n")
 
 
+# ---------- Strategy lab: several strategies x 60/30/15 minute entries, after spreads ----------
+LAB_FILE = Path("state/lab.txt")
+LAB_TARGETS = [(1.0, 1.5), (1.0, 2.0), (2.0, 3.0)]
+LAB_STRATEGIES = ["Pullback", "Sweep Reversal", "NY Breakout", "Daily Break"]
+
+
+def lab_prepare(df, minutes):
+    k = 60 // minutes
+    c, h, l = df["close"], df["high"], df["low"]
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / ATR_PERIOD, adjust=False).mean()
+    ef = c.ewm(span=50 * k, adjust=False).mean()
+    es = c.ewm(span=200 * k, adjust=False).mean()
+    dts = df["datetime"]
+    return {
+        "k": k, "o": df["open"].values, "h": h.values, "l": l.values, "c": c.values,
+        "atr": atr.values, "atr_h": (atr * (k ** 0.5)).values, "ef": ef.values, "es": es.values,
+        "es_old": es.shift(10 * k).values, "dt": dts, "days": dts.dt.date.values,
+        "hour": dts.dt.hour.values, "mod": (dts.dt.hour * 60 + dts.dt.minute).values, "n": len(df),
+    }
+
+
+def lab_day_groups(d):
+    groups = {}
+    for i, day in enumerate(d["days"]):
+        groups.setdefault(day, []).append(i)
+    return {day: np.array(ix) for day, ix in groups.items()}
+
+
+def lab_trend(d, i, side):
+    e, eo, c = d["es"][i], d["es_old"][i], d["c"][i]
+    if e != e or eo != eo:
+        return False
+    return (c > e and e > eo) if side == "BUY" else (c < e and e < eo)
+
+
+def lab_fix_risk(side, entry, sl, atr_min, atr_max):
+    risk = abs(entry - sl)
+    if risk > atr_max:
+        return None
+    if risk < atr_min:
+        sl = entry - atr_min if side == "BUY" else entry + atr_min
+    return sl
+
+
+def lab_pullback(d):
+    out, k = [], d["k"]
+    h, l, c, o, ef, atr = d["h"], d["l"], d["c"], d["o"], d["ef"], d["atr"]
+    for i in range(200 * k + 10 * k, d["n"] - 1):
+        if not (420 <= d["mod"][i] <= 1020) or not atr[i] > 0:
+            continue
+        for side in ("BUY", "SELL"):
+            if not lab_trend(d, i, side) or (ef[i] > d["es"][i]) != (side == "BUY"):
+                continue
+            if side == "BUY" and l[i - 1] <= ef[i - 1] and c[i] > ef[i] and c[i] > o[i]:
+                sl = lab_fix_risk(side, c[i], l[i - 4:i + 1].min() - 0.2 * atr[i], 0.5 * atr[i], 3 * atr[i])
+            elif side == "SELL" and h[i - 1] >= ef[i - 1] and c[i] < ef[i] and c[i] < o[i]:
+                sl = lab_fix_risk(side, c[i], h[i - 4:i + 1].max() + 0.2 * atr[i], 0.5 * atr[i], 3 * atr[i])
+            else:
+                continue
+            if sl is not None:
+                out.append((i, side, sl))
+    return out
+
+
+def lab_sweep_reversal(d):
+    out, k = [], d["k"]
+    for day, idx in lab_day_groups(d).items():
+        asia = idx[d["hour"][idx] < SESSION_START]
+        sess = idx[(d["mod"][idx] >= SESSION_START * 60) & (d["mod"][idx] <= SESSION_END * 60)]
+        if len(asia) < ASIA_RANGE_HOURS * k or len(sess) == 0:
+            continue
+        hi, lo = d["h"][asia].max(), d["l"][asia].min()
+        for i in sess:
+            if i >= d["n"] - 1:
+                break
+            c, atr = d["c"][i], d["atr"][i]
+            if c > hi or c < lo:        # a real breakout today: not a fake-out day
+                break
+            if not atr > 0:
+                break
+            side = sl = None
+            if d["h"][i] > hi:
+                side, sl = "SELL", d["h"][i] + 0.1 * atr
+            elif d["l"][i] < lo:
+                side, sl = "BUY", d["l"][i] - 0.1 * atr
+            if side:
+                sl = lab_fix_risk(side, c, sl, 0.5 * atr, 3 * atr)
+                if sl is not None:
+                    out.append((i, side, sl))
+                break
+    return out
+
+
+def lab_ny_breakout(d):
+    out, k = [], d["k"]
+    for day, idx in lab_day_groups(d).items():
+        rng = idx[(d["mod"][idx] >= 720) & (d["mod"][idx] < 810)]
+        win = idx[(d["mod"][idx] >= 810) & (d["mod"][idx] <= 960)]
+        if len(rng) < int(1.5 * k) or len(win) == 0:
+            continue
+        hi, lo = d["h"][rng].max(), d["l"][rng].min()
+        for i in win:
+            if i >= d["n"] - 1:
+                break
+            c, ah = d["c"][i], d["atr_h"][i]
+            if not ah > 0 or not (0.5 * ah <= hi - lo <= 4 * ah):
+                break
+            if c > hi or c < lo:
+                side = "BUY" if c > hi else "SELL"
+                mid = (hi + lo) / 2
+                sl = mid - 0.1 * ah if side == "BUY" else mid + 0.1 * ah
+                if lab_trend(d, i, side):
+                    sl = lab_fix_risk(side, c, sl, 0.5 * ah, 3 * ah)
+                    if sl is not None:
+                        out.append((i, side, sl))
+                break
+    return out
+
+
+def lab_daily_break(d):
+    out = []
+    days = sorted(lab_day_groups(d).items())
+    prev = None
+    for day, idx in days:
+        if prev is not None:
+            hi, lo = d["h"][prev].max(), d["l"][prev].min()
+            for i in idx:
+                if i >= d["n"] - 1:
+                    break
+                if not (420 <= d["mod"][i] <= 960):
+                    continue
+                c, ah = d["c"][i], d["atr_h"][i]
+                if not ah > 0:
+                    break
+                if c > hi or c < lo:
+                    side = "BUY" if c > hi else "SELL"
+                    if lab_trend(d, i, side):
+                        sl = c - 1.5 * ah if side == "BUY" else c + 1.5 * ah
+                        out.append((i, side, sl))
+                    break
+        prev = idx
+    return out
+
+
+LAB_FUNCS = {"Pullback": lab_pullback, "Sweep Reversal": lab_sweep_reversal,
+             "NY Breakout": lab_ny_breakout, "Daily Break": lab_daily_break}
+
+
+def lab_evaluate(inst, d, cands, minutes, a, b):
+    """Run the candidate entries through the same trade rules as everywhere else. Returns (early, r, won, hours)."""
+    expire = max(1, EXPIRE_HOURS * 60 // minutes)
+    split, busy, out = int(d["n"] * 0.7), -1, []
+    for i, side, sl in cands:
+        if i <= busy:
+            continue
+        entry = d["c"][i]
+        risk = abs(entry - sl)
+        if risk <= 0:
+            continue
+        sign = 1 if side == "BUY" else -1
+        end = min(d["n"], i + 1 + expire)
+        result, j, tp1_hit = walk_trade(side, entry, sl, entry + sign * a * risk, entry + sign * b * risk,
+                                        d["h"][i + 1:end], d["l"][i + 1:end])
+        if result is None:
+            if end - (i + 1) < expire:
+                continue
+            result, j = ("TP1" if tp1_hit else "EXPIRED"), expire - 1
+        busy = i + 1 + j
+        r = trade_r(result, a, b) - cost_r(inst, entry, sl)
+        out.append((i < split, r, r > 0, (j + 1) * minutes / 60))
+    return out
+
+
+def run_lab():
+    rows = {}   # (strategy, minutes, target) -> trades
+    for inst in INSTRUMENTS:
+        if inst["name"] not in TF_PAIRS:
+            continue
+        for minutes in TF_MINUTES:
+            try:
+                time.sleep(8)
+                df = fetch_tf(inst["symbol"], minutes, TF_PAGES[minutes])
+            except Exception as e:
+                print(f"Could not fetch {inst['name']} {minutes}m: {str(e)[:150]}")
+                continue
+            d = lab_prepare(df, minutes)
+            for strat in LAB_STRATEGIES:
+                cands = LAB_FUNCS[strat](d)
+                for tgt in LAB_TARGETS:
+                    rows.setdefault((strat, minutes, tgt), []).extend(lab_evaluate(inst, d, cands, minutes, *tgt))
+            print(f"{inst['name']} {minutes}m done ({len(df)} candles)")
+    lines = ["==== STRATEGY LAB (after typical spreads, 3 pairs pooled) ====",
+             "Half closes at TP1, stop to entry, rest runs to TP2. 'hrs' = average hours a trade stays open.",
+             "'good' = t of 3+, positive in BOTH the early 70% and late 30%, 30+ trades.",
+             "Many variants are tried here, so a lucky winner is likely. Trust only 'good' rows with similar neighbours."]
+    for strat in LAB_STRATEGIES:
+        lines += ["", f"-- {strat} --",
+                  f"{'entry':>5s} {'TP1/TP2':>8s} {'trades':>6s} {'win%':>5s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s} {'hrs':>5s}"]
+        for minutes in TF_MINUTES:
+            for tgt in LAB_TARGETS:
+                t = rows.get((strat, minutes, tgt), [])
+                if not t:
+                    continue
+                n = len(t)
+                tot = sum(x[1] for x in t)
+                early = sum(x[1] for x in t if x[0])
+                late = sum(x[1] for x in t if not x[0])
+                ts = t_score([x[1] for x in t])
+                good = "  good" if early > 0 and late > 0 and n >= 30 and ts >= 3 else ""
+                lines.append(f"{minutes:>4d}m {tgt[0]:g}/{tgt[1]:g}".ljust(15)
+                             + f"{n:6d} {100 * sum(1 for x in t if x[2]) / n:5.0f} {tot / n:+8.2f} {ts:5.1f} "
+                             f"{early:+8.1f} {late:+8.1f} {sum(x[3] for x in t) / n:5.1f}{good}")
+    text = "\n".join(lines)
+    print(text)
+    LAB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAB_FILE.write_text(text + "\n")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -1379,6 +1599,9 @@ def main():
         return
     if "--tf" in sys.argv:
         run_tf()
+        return
+    if "--lab" in sys.argv:
+        run_lab()
         return
 
     run_news_safe()
