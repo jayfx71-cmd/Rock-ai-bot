@@ -103,7 +103,9 @@ CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 FEEDS = [
     ("FXStreet", "https://www.fxstreet.com/rss/news"),
     ("ForexLive", "https://www.forexlive.com/feed/news"),
-]
+    ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
+    ("CNBC Economy", "https://www.cnbc.com/id/20910258/device/rss/rss.html"),
+]   # a feed that is down is simply skipped
 NEWS_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD"}
 BRIEF_HOUR_UTC = 6             # morning brief goes out at the first run after 06:00 UTC (07:00 Nigeria)
 ALERT_MINUTES = 90             # warn about high-impact releases up to this long before they happen
@@ -112,8 +114,8 @@ BLACKOUT_AFTER_MIN = 90        # ... until this long after it, on the pairs that
 NFP_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD"]   # pairs used by the --nfp test
 NFP_PAGES = 7                  # pages of 5000 H1 candles to fetch for the --nfp test (about 5 years)
 NFP_FILE = Path("state/nfp.txt")
-HEADLINES_PER_RUN = 2
-HEADLINES_PER_DAY = 6
+HEADLINES_PER_RUN = 3
+HEADLINES_PER_DAY = 12
 STATE_FILE = Path("state/signals.json")
 BACKTEST_FILE = Path("state/backtest.json")
 # -----------------------------------------------------
@@ -1070,13 +1072,13 @@ def save_news(news):
     NEWS_FILE.write_text(json.dumps(news, indent=2))
 
 
-def fetch_calendar():
-    """High-impact releases for the major currencies this week, times in UTC."""
+def fetch_calendar(impacts=("High",)):
+    """Releases for the major currencies this week (high impact unless told otherwise), times in UTC."""
     r = requests.get(CALENDAR_URL, headers=HTTP_HEADERS, timeout=20)
     r.raise_for_status()
     events = []
     for e in r.json():
-        if e.get("impact") != "High" or e.get("country") not in NEWS_CURRENCIES:
+        if e.get("impact") not in impacts or e.get("country") not in NEWS_CURRENCIES:
             continue
         when = datetime.fromisoformat(e["date"]).astimezone(timezone.utc)
         events.append({
@@ -1226,7 +1228,7 @@ def fetch_headlines():
     return mixed
 
 
-def run_news(force=False):
+def run_news(force=False, repost=False):
     news = load_news()
     now = datetime.now(timezone.utc)
     local = now.astimezone(WAT)          # dates shown to subscribers use Nigeria time
@@ -1242,7 +1244,11 @@ def run_news(force=False):
         CURRENT_EVENTS[:] = events
         todays = [e for e in events if e["time"].astimezone(WAT).strftime("%Y-%m-%d") == today]
         brief_due = force or (now.weekday() < 5 and BRIEF_HOUR_UTC <= now.hour < 20)
-        if brief_due and news["brief_date"] != today:
+        try:   # medium-impact releases: listed for information, they never pause signals
+            todays_medium = [e for e in fetch_calendar(("Medium",)) if e["time"].astimezone(WAT).strftime("%Y-%m-%d") == today]
+        except Exception:
+            todays_medium = []
+        if brief_due and (repost or news["brief_date"] != today):
             lines = [f"🗞 <b>{BRAND} MORNING BRIEF</b> · {local:%a %d %b}", ""]
             if todays:
                 lines.append("High-impact releases today (Nigeria time):")
@@ -1257,11 +1263,13 @@ def run_news(force=False):
                           f"from {BLACKOUT_BEFORE_MIN} min before to {BLACKOUT_AFTER_MIN} min after each release."]
             else:
                 lines.append("No high-impact releases on the major currencies today. A quieter day.")
+            if todays_medium:
+                lines += ["", "Also today (smaller movers):"] + [event_line(e) for e in todays_medium[:6]]
             send("\n".join(lines))
             news["brief_date"] = today
         for e in events:
             mins = (e["time"] - now).total_seconds() / 60
-            if 0 < mins <= ALERT_MINUTES and e["id"] not in news["alerted"]:
+            if 0 < mins <= ALERT_MINUTES and (repost or e["id"] not in news["alerted"]):
                 until = (e["time"] + timedelta(minutes=BLACKOUT_AFTER_MIN)).astimezone(WAT)
                 pairs = ", ".join(affected_pairs(e)) or e["ccy"]
                 extra = ("NFP is the biggest mover of the month, so expect wild swings. "
@@ -1272,11 +1280,12 @@ def run_news(force=False):
                 news["alerted"].append(e["id"])
 
     # 1b) lesson of the day: a little fundamentals for newer traders
-    if (force or now.weekday() < 5) and 11 <= now.hour < 20 and news["lesson_date"] != today:
+    if repost or ((force or now.weekday() < 5) and 11 <= now.hour < 20 and news["lesson_date"] != today):
         title, body = LESSONS[news["lesson_idx"] % len(LESSONS)]
         send(f"🎓 <b>Lesson of the day:</b> {html.escape(title)}\n\n{html.escape(body)}")
         news["lesson_date"] = today
-        news["lesson_idx"] += 1
+        if not repost:
+            news["lesson_idx"] += 1
 
     # 2) headlines (daytime only, capped so the channel is not spammed)
     if news["day"] != today:
@@ -1284,10 +1293,10 @@ def run_news(force=False):
     if force or 6 <= now.hour < 21:
         items = fetch_headlines()
         first_run = not news["seen"]
-        fresh = [h for h in items if h["link"] not in news["seen"]]
+        fresh = [h for h in items if repost or h["link"] not in news["seen"]]
         posted = 0
         for h in fresh:
-            if posted >= HEADLINES_PER_RUN or news["day_count"] >= HEADLINES_PER_DAY:
+            if posted >= HEADLINES_PER_RUN or (news["day_count"] >= HEADLINES_PER_DAY and not repost):
                 break
             send(f"📰 <b>Market Pulse</b> ({h['source']})\n{html.escape(h['title'])}{explain_headline(h['title'])}\n{h['link']}")
             posted += 1
@@ -1364,28 +1373,36 @@ def run_extras(candles, state, now):
 
     # 2) day recap
     if now.hour >= 20 and news["recap_date"] != today:
-        live = [t for t in state["closed"] + state["open"] if t.get("live", True)]
+        names = {i["name"] for i in INSTRUMENTS}   # ignore retired instruments (old synthetics)
+        live = [t for t in state["closed"] + state["open"] if t.get("live", True) and t["pair"] in names]
         opened = [t for t in live if str(t.get("opened_at", ""))[:10] == today]
-        closed = [t for t in state["closed"] if t.get("live", True) and str(t.get("closed_at", ""))[:10] == today]
-        still = [t for t in state["open"] if t.get("live", True)]
+        closed = [t for t in state["closed"] if t.get("live", True) and t["pair"] in names
+                  and str(t.get("closed_at", ""))[:10] == today]
+        still = [t for t in state["open"] if t.get("live", True) and t["pair"] in names]
         lines = [f"📊 <b>{BRAND} DAY RECAP</b> · {now.astimezone(WAT):%a %d %b}", ""]
         lines.append(f"Signals posted today: {len(opened)}")
         if closed:
             icon = {"TP2": "✅", "TP1": "🟡", "SL": "❌", "EXPIRED": "⏱"}
-            lines += [f"{icon.get(t['result'], '•')} {t['side']} {t['pair']}: {t['r']:+.1f}R" for t in closed]
+            word = {"TP2": "full target hit", "TP1": "half won, rest at break-even", "SL": "stopped out", "EXPIRED": "expired, no gain or loss"}
+            lines += [f"{icon.get(t['result'], '•')} {t['side']} {t['pair']}: {t['r']:+.1f}R ({word.get(t['result'], '')})" for t in closed]
             lines.append(f"Closed today: {sum(t['r'] for t in closed):+.1f}R")
         if still:
             lines.append("Still open: " + ", ".join(f"{t['side']} {t['pair']}" for t in still))
         if not opened and not closed:
             lines += ["", "No setups today. Daily Break only trades a clean breakout of yesterday's high or low that agrees "
                       "with the trend. No setup means no trade, and that is the plan."]
-        if state["closed"]:
-            try:
-                lines += ["", stats_line(state, "Daily Break")]
-            except Exception:
-                pass
+        done = [t for t in state["closed"] if t.get("live", True) and t.get("strategy") == "Daily Break"]
+        if done:
+            w, l, rate, r = record(done)
+            lines += ["", f"📊 Daily Break record: {w}W / {l}L ({rate:.0f}%) | {r:+.1f}R"]
+        else:
+            lines += ["", "📊 Daily Break record: building (no closed trades yet)"]
+        if closed or opened:
+            lines += ["", "R = the amount you risk on a trade. +2R means you made double your risk, "
+                      "-1R means the stop loss was hit, 0R means it closed at break-even."]
+        news["recap_date"] = today   # mark first, so a retry or a second run cannot post it twice
+        save_news(news)
         send("\n".join(lines))
-        news["recap_date"] = today
         changed = True
 
     if changed:
@@ -1401,11 +1418,11 @@ def run_extras_safe(candles, state, now):
         print(f"Extras step failed: {str(e)[:150]}")
 
 
-def run_news_safe(force=False):
+def run_news_safe(force=False, repost=False):
     if not NEWS:
         return
     try:
-        run_news(force)
+        run_news(force, repost)
     except Exception as e:  # news must never stop the signals
         print(f"News step failed: {str(e)[:150]}")
 
@@ -1814,6 +1831,10 @@ def main():
         return
     if "--sweep" in sys.argv:
         run_sweep()
+        return
+    if "--news-repost" in sys.argv:   # testing only: ignores the once-a-day rules, so it can post duplicates
+        run_news_safe(force=True, repost=True)
+        print("News repost done.")
         return
     if "--news" in sys.argv:
         run_news_safe(force=True)
