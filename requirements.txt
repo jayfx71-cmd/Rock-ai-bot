@@ -1,3 +1,5 @@
 pandas
 requests
 websocket-client
+matplotlib
+numpy
