@@ -1769,7 +1769,7 @@ def lab_ny_breakout(d):
 DAILY_END_MIN = 960   # Daily Break entries are allowed until this minute of the UTC day (960 = 16:00 UTC = 17:00 Nigeria)
 
 
-def lab_daily_break(d, live=False, end_min=None):
+def lab_daily_break(d, live=False, end_min=None, sl_mult=1.5):
     end_min = end_min or DAILY_END_MIN
     out = []
     days = sorted(lab_day_groups(d).items())
@@ -1788,7 +1788,7 @@ def lab_daily_break(d, live=False, end_min=None):
                 if c > hi or c < lo:
                     side = "BUY" if c > hi else "SELL"
                     if lab_trend(d, i, side):
-                        sl = c - 1.5 * ah if side == "BUY" else c + 1.5 * ah
+                        sl = c - sl_mult * ah if side == "BUY" else c + sl_mult * ah
                         out.append((i, side, sl))
                     break
         prev = idx
@@ -2320,6 +2320,81 @@ def run_widen(insts=None, out_file=None, title="WIDEN TEST: Daily Break"):
     out_file.write_text(text + "\n")
 
 
+WIDE_FILE = Path("state/wide.txt")
+WIDE_STOPS = [1.5, 2.5, 3.5]                    # stop distance in hourly ATRs
+WIDE_TARGETS = [(1.0, 2.0), (1.0, 3.0), (2.0, 3.0)]
+
+
+def run_wide():
+    """Forex only: does a WIDER stop (spread becomes a smaller share) and bigger targets give an edge?"""
+    insts = [i for i in INSTRUMENTS if i["kind"] == "forex"]
+    rows, by_pair, days = {}, {}, {}
+    for inst in insts:
+        for minutes in (60, 30):
+            try:
+                time.sleep(8)
+                df = fetch_tf(inst["symbol"], minutes, TF_PAGES[minutes])
+            except Exception as e:
+                print(f"Could not fetch {inst['name']} {minutes}m: {str(e)[:150]}")
+                continue
+            d = lab_prepare(df, minutes)
+            days[(minutes, inst["name"])] = max(1, len(lab_day_groups(d)))
+            for sm in WIDE_STOPS:
+                cands = lab_daily_break(d, sl_mult=sm)
+                for tgt in WIDE_TARGETS:
+                    res = lab_evaluate(inst, d, cands, minutes, *tgt)
+                    rows.setdefault((minutes, sm, tgt), []).extend(res)
+                    by_pair[(minutes, sm, tgt, inst["name"])] = res
+            print(f"{inst['name']} {minutes}m done ({len(df)} candles)")
+
+    def stat(t):
+        n = len(t)
+        early, late = sum(x[1] for x in t if x[0]), sum(x[1] for x in t if not x[0])
+        ts = t_score([x[1] for x in t])
+        good = early > 0 and late > 0 and n >= 30 and ts >= 3
+        return n, sum(x[1] for x in t) / n, ts, early, late, good
+
+    lines = ["==== WIDE-STOP TEST: Daily Break on the 7 forex pairs, after spreads ====",
+             "Stop = number of hourly ATRs. Wider stop = spread is a smaller share of each trade.",
+             "'sig/d' = signals per day, all 7 pairs together. 'good' = t of 3+, positive early AND late, 30+ trades.",
+             "", f"{'entry':>5s} {'stop':>5s} {'TP1/TP2':>8s} {'trades':>6s} {'sig/d':>5s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
+    best = None
+    for (minutes, sm, tgt), t in sorted(rows.items()):
+        if not t:
+            continue
+        n, avg, ts, early, late, good = stat(t)
+        dpp = [v for (m, _), v in days.items() if m == minutes]
+        sigd = n / (sum(dpp) / len(dpp)) if dpp else 0
+        lines.append(f"{minutes:>4d}m {sm:>4g}x {tgt[0]:g}/{tgt[1]:g}".ljust(21)
+                     + f"{n:6d} {sigd:5.2f} {avg:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{'  good' if good else ''}")
+        if best is None or ts > best[0]:
+            best = (ts, (minutes, sm, tgt))
+    if best:
+        minutes, sm, tgt = best[1]
+        lines += ["", f"-- PER PAIR for the best pooled row ({minutes}m, stop {sm:g}x, {tgt[0]:g}/{tgt[1]:g}) --",
+                  f"{'pair':8s} {'trades':>6s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
+        for inst in insts:
+            t = by_pair.get((minutes, sm, tgt, inst["name"]), [])
+            if t:
+                n, avg, ts, early, late, good = stat(t)
+                lines.append(f"{inst['name']:8s} {n:6d} {avg:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{'  good' if good else ''}")
+    goods = []
+    for (minutes, sm, tgt, name), t in by_pair.items():
+        if t:
+            n, avg, ts, early, late, good = stat(t)
+            if good:
+                goods.append((ts, minutes, sm, tgt, name, n, avg))
+    lines += ["", "-- ANY single pair that passed on its own (best first) --"]
+    for ts, minutes, sm, tgt, name, n, avg in sorted(goods, reverse=True)[:12]:
+        lines.append(f"{name:8s} {minutes:>3d}m stop {sm:g}x {tgt[0]:g}/{tgt[1]:g}: {n} trades, {avg:+.2f}R each, t {ts:.1f}")
+    if not goods:
+        lines.append("None. No forex pair passed with a wider stop either.")
+    text = "\n".join(lines)
+    print(text)
+    WIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    WIDE_FILE.write_text(text + "\n")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -2340,6 +2415,9 @@ def main():
         return
     if "--gold" in sys.argv:
         run_gold()
+        return
+    if "--wide" in sys.argv:
+        run_wide()
         return
     if "--widen" in sys.argv:
         run_widen()
