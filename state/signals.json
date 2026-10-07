@@ -14,7 +14,8 @@
       "unit": "pips",
       "candle": "2026-10-07T12:00:00",
       "opened_at": "2026-10-07T12:57:20.401093+00:00",
-      "live": true
+      "live": true,
+      "tp1_notified": true
     }
   ],
   "closed": [
