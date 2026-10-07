@@ -1,0 +1,54 @@
+==== VOLATILITY INDICES (breakout, 24/7), after typical spreads ====
+'sig/d' = signals per day (all pairs in this table added together).
+Half closes at TP1, stop to entry, rest runs to TP2. 'hrs' = average hours a trade stays open.
+'good' = t of 3+, positive in BOTH the early 70% and late 30%, 30+ trades.
+Many variants are tried here, so a lucky winner is likely. Trust only 'good' rows with similar neighbours.
+
+-- Vol Break --
+entry  TP1/TP2 trades sig/d  win%  R/trade     t  early R   late R   hrs
+  60m 1/1.5       574  3.44    52    +0.03   0.7    +29.2    -13.0   7.6
+  60m 1/2         559  3.35    52    +0.01   0.2    +24.5    -20.5   9.3
+  60m 2/3         492  2.95    31    -0.07  -1.1     +9.5    -45.5  15.9
+  30m 1/1.5       579  3.47    52    +0.03   0.8    +23.8     -4.2   7.4
+  30m 1/2         566  3.39    51    +0.02   0.4    +19.0    -10.0   8.8
+  30m 2/3         494  2.96    33    -0.03  -0.4    +17.0    -29.5  15.2
+
+-- Vol Break Multi --
+entry  TP1/TP2 trades sig/d  win%  R/trade     t  early R   late R   hrs
+  60m 1/1.5       709  4.25    52    +0.03   0.8    +39.0    -18.2   7.8
+  60m 1/2         658  3.94    52    +0.02   0.4    +35.5    -25.5   9.4
+  60m 2/3         566  3.39    31    -0.05  -0.8    +19.0    -47.5  15.8
+  30m 1/1.5       731  4.38    52    +0.04   1.0    +39.5    -10.8   7.5
+  30m 1/2         690  4.13    51    +0.00   0.1    +21.0    -19.5   8.8
+  30m 2/3         568  3.40    33    +0.01   0.2    +35.5    -29.0  15.6
+
+-- PER PAIR (TP1/TP2 1/2): is one pair carrying the result? --
+strategy        entry pair     trades  R/trade     t  early R   late R
+Vol Break         30m Volatility 100     81    +0.12   0.9     +9.5     +0.0
+Vol Break         30m Volatility 100 (1s)     84    -0.12  -1.1    -10.5     +0.0
+Vol Break         30m Volatility 25     81    -0.07  -0.6     -3.0     -2.5
+Vol Break         30m Volatility 25 (1s)     81    -0.01  -0.1     +0.5     -1.5
+Vol Break         30m Volatility 75     79    +0.00   0.0     +7.5     -7.5
+Vol Break         30m Volatility 75 (1s)     80    +0.17   1.4     +5.0     +9.0
+Vol Break         30m Volatility 90 (1s)     80    +0.03   0.3    +10.0     -7.5
+Vol Break         60m Volatility 100     83    +0.06   0.5     +7.0     -2.0
+Vol Break         60m Volatility 100 (1s)     83    -0.19  -1.8    -13.5     -2.5
+Vol Break         60m Volatility 25     85    -0.12  -1.0     -2.0     -8.0
+Vol Break         60m Volatility 25 (1s)     76    +0.12   1.1     +8.0     +1.0
+Vol Break         60m Volatility 75     78    -0.04  -0.3     +6.5     -9.5
+Vol Break         60m Volatility 75 (1s)     77    +0.20   1.7     +9.5     +6.0
+Vol Break         60m Volatility 90 (1s)     77    +0.05   0.4     +9.0     -5.5
+Vol Break Multi   30m Volatility 100     96    +0.04   0.4     +6.0     -2.0
+Vol Break Multi   30m Volatility 100 (1s)    105    -0.06  -0.6     -6.0     +0.0
+Vol Break Multi   30m Volatility 25     99    -0.09  -0.8     -4.5     -4.0
+Vol Break Multi   30m Volatility 25 (1s)     99    -0.01  -0.1     +4.5     -5.5
+Vol Break Multi   30m Volatility 75     93    -0.02  -0.1     +8.5    -10.0
+Vol Break Multi   30m Volatility 75 (1s)     96    +0.17   1.6     +8.5     +8.0
+Vol Break Multi   30m Volatility 90 (1s)    102    -0.02  -0.2     +4.0     -6.0
+Vol Break Multi   60m Volatility 100     97    +0.01   0.1     +3.5     -2.5
+Vol Break Multi   60m Volatility 100 (1s)     99    -0.08  -0.8     -7.5     -0.5
+Vol Break Multi   60m Volatility 25     99    -0.12  -1.2     -5.5     -6.5
+Vol Break Multi   60m Volatility 25 (1s)     88    +0.15   1.5    +15.5     -2.0
+Vol Break Multi   60m Volatility 75     89    -0.03  -0.3     +8.0    -11.0
+Vol Break Multi   60m Volatility 75 (1s)     94    +0.19   1.8    +13.0     +5.0
+Vol Break Multi   60m Volatility 90 (1s)     92    +0.01   0.0     +8.5     -8.0
