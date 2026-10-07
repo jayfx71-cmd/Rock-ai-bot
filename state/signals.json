@@ -1,23 +1,5 @@
 {
-  "open": [
-    {
-      "pair": "XAU/USD",
-      "strategy": "Daily Break",
-      "side": "SELL",
-      "entry": 4082.09,
-      "sl": 4102.27,
-      "tp1": 4061.9,
-      "tp2": 4041.72,
-      "tp1_r": 1.0,
-      "tp2_r": 2.0,
-      "risk_pips": 201.8,
-      "unit": "pips",
-      "candle": "2026-10-07T12:00:00",
-      "opened_at": "2026-10-07T12:57:20.401093+00:00",
-      "live": true,
-      "tp1_notified": true
-    }
-  ],
+  "open": [],
   "closed": [
     {
       "pair": "USD/JPY",
@@ -114,6 +96,26 @@
       "result": "SL",
       "r": -1.0,
       "closed_at": "2026-10-07T12:57:20.031771+00:00"
+    },
+    {
+      "pair": "XAU/USD",
+      "strategy": "Daily Break",
+      "side": "SELL",
+      "entry": 4082.09,
+      "sl": 4102.27,
+      "tp1": 4061.9,
+      "tp2": 4041.72,
+      "tp1_r": 1.0,
+      "tp2_r": 2.0,
+      "risk_pips": 201.8,
+      "unit": "pips",
+      "candle": "2026-10-07T12:00:00",
+      "opened_at": "2026-10-07T12:57:20.401093+00:00",
+      "live": true,
+      "tp1_notified": true,
+      "result": "TP1",
+      "r": 0.5,
+      "closed_at": "2026-10-07T13:51:16.431970+00:00"
     }
   ],
   "last_signal": {
