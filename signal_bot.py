@@ -477,12 +477,12 @@ def strategy_mean_reversion(inst, df):
 
 
 def strategy_daily_break(inst, df):
-    """Live: first 30-minute close beyond yesterday's high/low (07:00-16:00 UTC), with the 200-hour trend."""
+    """Live (tested as Break Multi): a 30-minute close beyond yesterday's high/low, then up to 2 more with-the-trend breaks of the day high/low (07:00-18:00 UTC)."""
     if len(df) < 450:
         return None
     minutes = max(1, int(round((df["datetime"].iloc[-1] - df["datetime"].iloc[-2]).total_seconds() / 60)))
     d = lab_prepare(df.reset_index(drop=True), minutes)
-    cands = lab_daily_break(d, live=True)
+    cands = lab_daily_break_multi(d, live=True)
     if not cands or cands[-1][0] != d["n"] - 1:
         return None
     i, side, sl = cands[-1]
@@ -1354,7 +1354,7 @@ def run_extras(candles, state, now):
     changed = False
 
     # 1) levels to watch: the exact lines the Daily Break strategy is waiting for
-    if 7 <= now.hour < 16 and news["levels_date"] != today:
+    if 7 <= now.hour < 18 and news["levels_date"] != today:
         blocks, panels = [], []
         for name in STRATEGY_PAIRS.get("Daily Break", []):
             df = candles.get(name)
@@ -1372,8 +1372,8 @@ def run_extras(candles, state, now):
             up, down = lab_trend(d, i, "BUY"), lab_trend(d, i, "SELL")
             broke = any(7 * 60 <= d["mod"][j] <= 16 * 60 and (d["c"][j] > hi or d["c"][j] < lo) for j in cur)
             if broke:
-                note = "Price already closed beyond yesterday's range, so no Daily Break today."
-                short, pstate, watch = "already broke out today: no Daily Break", "broke", "No Daily Break today"
+                note = "Price already closed beyond yesterday's range. Now watching for a new high or low of the day, with the trend."
+                short, pstate, watch = "already broke yesterday's range: watching new highs/lows", "broke", "Watching for a new high or low of the day"
             elif up:
                 note = f"📈 Trend up. Watching a 30-min close ABOVE <code>{hi:.{dec}f}</code> for a BUY."
                 short, pstate = f"trend UP: watching a close above {hi:.{dec}f} (BUY)", "up"
@@ -1393,7 +1393,7 @@ def run_extras(candles, state, now):
             save_news(news)
             head = f"📍 <b>{BRAND} LEVELS TO WATCH</b> · {now.astimezone(WAT):%a %d %b}"
             intro = ("Our Daily Break strategy waits for a 30-minute close beyond yesterday's high or low, "
-                     "in the direction of the trend (08:00 to 17:00 Nigeria time).")
+                     "in the direction of the trend (08:00 to 19:00 Nigeria time).")
             full = f"{head}\n\n{intro} These are today's lines:\n\n" + "\n\n".join(blocks) \
                    + "\n\nNo breakout means no trade. Waiting is part of the plan."
             short = f"{head}\n\n{intro}\n\nNo breakout means no trade. Waiting is part of the plan."
@@ -1892,7 +1892,7 @@ def lab_daily_break_free(d):
     return out
 
 
-def lab_daily_break_multi(d):
+def lab_daily_break_multi(d, live=False):
     """Daily Break, then up to 2 more trend-following signals the same day when price makes a new day high/low."""
     out, k = [], d["k"]
     prev = None
@@ -1901,7 +1901,7 @@ def lab_daily_break_multi(d):
             hi, lo = d["h"][prev].max(), d["l"][prev].min()
             fired, last_i = 0, -999
             for pos, i in enumerate(idx):
-                if i >= d["n"] - 1 or fired >= 3:
+                if i >= d["n"] - (0 if live else 1) or fired >= 3:
                     break
                 if not (420 <= d["mod"][i] <= 1080):
                     continue
