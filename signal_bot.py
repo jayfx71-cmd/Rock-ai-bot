@@ -1958,6 +1958,72 @@ def run_more():
     run_lab(["XAU/USD"], MORE_FILE, "GOLD MORE SIGNALS (XAU/USD)", MORE_STRATEGIES, [60, 30])
 
 
+def _lab_retest(d, level_fn, end_min=960):
+    """Breakout, then wait for price to come back, touch the broken level and hold it. One entry per day, with the trend."""
+    out, k = [], d["k"]
+    prev = None
+    for day, idx in sorted(lab_day_groups(d).items()):
+        lv = level_fn(d, idx, prev)
+        prev = idx
+        if lv is None:
+            continue
+        hi, lo = lv
+        side = level = brk = None
+        for pos, i in enumerate(idx):
+            if i >= d["n"] - 1:
+                break
+            m = d["mod"][i]
+            if m < 420 or m > end_min + 120:
+                continue
+            c, o, ah = d["c"][i], d["o"][i], d["atr_h"][i]
+            if not ah > 0:
+                break
+            if side is None:
+                if m <= end_min and (c > hi or c < lo):
+                    side, level, brk = ("BUY", hi, pos) if c > hi else ("SELL", lo, pos)
+                continue
+            if pos - brk > 4 * k:
+                break
+            if side == "BUY":
+                if c < level - 0.3 * ah:
+                    break
+                if d["l"][i] <= level + 0.15 * ah and c > level and c > o and lab_trend(d, i, "BUY"):
+                    sl = lab_fix_risk("BUY", c, d["l"][idx[brk:pos + 1]].min() - 0.2 * ah, 0.5 * ah, 3 * ah)
+                    if sl is not None:
+                        out.append((i, "BUY", sl))
+                    break
+            else:
+                if c > level + 0.3 * ah:
+                    break
+                if d["h"][i] >= level - 0.15 * ah and c < level and c < o and lab_trend(d, i, "SELL"):
+                    sl = lab_fix_risk("SELL", c, d["h"][idx[brk:pos + 1]].max() + 0.2 * ah, 0.5 * ah, 3 * ah)
+                    if sl is not None:
+                        out.append((i, "SELL", sl))
+                    break
+    return out
+
+
+def lab_retest_daily(d):
+    return _lab_retest(d, lambda d, idx, prev: None if prev is None else (d["h"][prev].max(), d["l"][prev].min()))
+
+
+def lab_retest_asia(d):
+    def lv(d, idx, prev):
+        asia = idx[d["mod"][idx] < 420]
+        return (d["h"][asia].max(), d["l"][asia].min()) if len(asia) >= 5 * d["k"] else None
+    return _lab_retest(d, lv)
+
+
+RETEST_STRATEGIES = ["Retest Daily", "Retest Asia"]
+LAB_FUNCS.update({"Retest Daily": lab_retest_daily, "Retest Asia": lab_retest_asia})
+RETEST_FILE = Path("state/retest.txt")
+
+
+def run_retest():
+    pairs = [i["name"] for i in INSTRUMENTS if i["kind"] == "forex"]
+    run_lab(pairs, RETEST_FILE, "BREAKOUT + RETEST (all 7 pairs pooled)", RETEST_STRATEGIES, [60, 30])
+
+
 GOLD_FILE = Path("state/gold.txt")
 
 
@@ -2608,6 +2674,9 @@ def main():
         return
     if "--goldmore" in sys.argv:
         run_goldmore()
+        return
+    if "--retest" in sys.argv:
+        run_retest()
         return
     if "--more" in sys.argv:
         run_more()
