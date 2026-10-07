@@ -2024,6 +2024,92 @@ def run_retest():
     run_lab(pairs, RETEST_FILE, "BREAKOUT + RETEST (all 7 pairs pooled)", RETEST_STRATEGIES, [60, 30])
 
 
+VOL_PAGES = {60: 4, 30: 8}   # pages of 5000 candles (30m: about 2 years)
+
+
+def fetch_deriv_tf(symbol, minutes, pages):
+    """Several pages of Deriv candles at any size, going back in time."""
+    import websocket
+    frames, end = [], "latest"
+    for _ in range(pages):
+        data, errors = None, []
+        for url in DERIV_URLS:
+            try:
+                ws = websocket.create_connection(url, timeout=30)
+                try:
+                    ws.send(json.dumps({"ticks_history": symbol, "adjust_start_time": 1, "count": 5000, "end": end,
+                                        "granularity": minutes * 60, "style": "candles"}))
+                    for _ in range(5):
+                        data = json.loads(ws.recv())
+                        if "candles" in data or "error" in data:
+                            break
+                finally:
+                    ws.close()
+                if data and "candles" in data:
+                    break
+                errors.append(str((data or {}).get("error", "no candles"))[:70])
+            except Exception as e:
+                errors.append(str(e)[:70])
+            data = None
+        if data is None:
+            if not frames:
+                raise RuntimeError(" | ".join(errors))
+            break
+        df = pd.DataFrame(data["candles"])
+        frames.append(df)
+        if len(df) < 100:
+            break
+        end = int(df["epoch"].min()) - 1
+        time.sleep(1)
+    df = pd.concat(frames).drop_duplicates("epoch").sort_values("epoch").reset_index(drop=True)
+    df["datetime"] = pd.to_datetime(df["epoch"], unit="s")
+    for c in ["open", "high", "low", "close"]:
+        df[c] = df[c].astype(float)
+    return df[df["datetime"] + timedelta(minutes=minutes) <= datetime.utcnow()].reset_index(drop=True)
+
+
+def lab_vol_break(d, multi=False):
+    """Daily Break for markets that never close: yesterday's high/low (UTC day), any hour, with the trend."""
+    out, k = [], d["k"]
+    prev = None
+    for day, idx in sorted(lab_day_groups(d).items()):
+        if prev is not None:
+            hi, lo = d["h"][prev].max(), d["l"][prev].min()
+            fired, last_i = 0, -999
+            for pos, i in enumerate(idx):
+                if i >= d["n"] - 1 or fired >= (3 if multi else 1):
+                    break
+                c, ah = d["c"][i], d["atr_h"][i]
+                if not ah > 0:
+                    break
+                if fired == 0:
+                    side = "BUY" if c > hi else ("SELL" if c < lo else None)
+                else:
+                    if i - last_i < 2 * k:
+                        continue
+                    td_hi, td_lo = d["h"][idx[:pos]].max(), d["l"][idx[:pos]].min()
+                    side = "BUY" if c > td_hi else ("SELL" if c < td_lo else None)
+                if side and lab_trend(d, i, side):
+                    out.append((i, side, c - 1.5 * ah if side == "BUY" else c + 1.5 * ah))
+                    fired += 1
+                    last_i = i
+                elif side and fired == 0:
+                    break
+        prev = idx
+    return out
+
+
+VOL_STRATEGIES = ["Vol Break", "Vol Break Multi"]
+LAB_FUNCS.update({"Vol Break": lambda d: lab_vol_break(d), "Vol Break Multi": lambda d: lab_vol_break(d, multi=True)})
+VOL_FILE = Path("state/vol.txt")
+
+
+def run_vol():
+    insts = [{"name": n, "kind": "synthetic", "symbol": sym} for n, sym in SYNTHETICS_OFF.items()]
+    run_lab([i["name"] for i in insts], VOL_FILE, "VOLATILITY INDICES (breakout, 24/7)", VOL_STRATEGIES, [60, 30],
+            source=lambda inst, m: fetch_deriv_tf(inst["symbol"], m, VOL_PAGES[m]), instruments=insts)
+
+
 GOLD_FILE = Path("state/gold.txt")
 
 
@@ -2039,7 +2125,7 @@ def run_ideas():
     run_lab(pairs, IDEAS_FILE, "IDEAS LAB (all 7 pairs)", IDEA_STRATEGIES, [30])
 
 
-def run_lab(pairs=None, out_file=None, title="STRATEGY LAB (3 pairs pooled)", strategies=None, minutes_list=None):
+def run_lab(pairs=None, out_file=None, title="STRATEGY LAB (3 pairs pooled)", strategies=None, minutes_list=None, source=None, instruments=None):
     pairs = pairs or TF_PAIRS
     out_file = out_file or LAB_FILE
     pair_strats = strategies or ["Daily Break"]
@@ -2048,13 +2134,16 @@ def run_lab(pairs=None, out_file=None, title="STRATEGY LAB (3 pairs pooled)", st
     rows = {}   # (strategy, minutes, target) -> trades
     by_pair = {}   # (strategy, minutes, pair) -> trades at the 1/2 target
     day_counts = {}   # minutes -> trading days per pair
-    for inst in INSTRUMENTS:
+    for inst in (instruments or INSTRUMENTS):
         if inst["name"] not in pairs:
             continue
         for minutes in minutes_list:
             try:
-                time.sleep(8)
-                df = fetch_tf(inst["symbol"], minutes, TF_PAGES[minutes])
+                if source:
+                    df = source(inst, minutes)
+                else:
+                    time.sleep(8)
+                    df = fetch_tf(inst["symbol"], minutes, TF_PAGES[minutes])
             except Exception as e:
                 print(f"Could not fetch {inst['name']} {minutes}m: {str(e)[:150]}")
                 continue
@@ -2674,6 +2763,9 @@ def main():
         return
     if "--goldmore" in sys.argv:
         run_goldmore()
+        return
+    if "--vol" in sys.argv:
+        run_vol()
         return
     if "--retest" in sys.argv:
         run_retest()
