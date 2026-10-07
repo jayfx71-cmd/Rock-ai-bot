@@ -1,0 +1,16 @@
+==== MARKETS TEST: Daily Break on other markets, 30-minute entries, TP1 1:1 / TP2 1:2, after spreads ====
+'sig/day' = average signals per day on that pair. 'good' = t of 3+, positive early AND late, 30+ trades.
+
+-- Window: until 17:00 Nigeria time (today) --
+pair     trades sig/day  win%  R/trade     t  early R   late R
+BTC/USD     232    0.37    54    +0.06   0.8     -2.1    +15.7
+ETH/USD     222    0.35    45    -0.15  -2.1    -22.5    -10.9
+ALL         454    0.73    50    -0.04  -0.9    -24.6     +4.8
+
+-- Window: until 21:00 Nigeria time --
+pair     trades sig/day  win%  R/trade     t  early R   late R
+BTC/USD     267    0.43    52    +0.02   0.3    -15.2    +20.0
+ETH/USD     254    0.41    44    -0.17  -2.6    -34.2     -8.5
+ALL         521    0.83    48    -0.07  -1.6    -49.4    +11.5
+
+More pairs mean more signals, but only add a pair if it holds up on its own (positive early and late).
