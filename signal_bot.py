@@ -47,7 +47,8 @@ SYNTHETICS_OFF = {
 STRATEGIES = ["Daily Break"]  # LIVE: these post to the channel (delete a name to switch it off)
 RESEARCH_STRATEGIES = ["London Breakout", "EMA Cross", "Price Action", "Mean Reversion"]  # tested by --backtest/--sweep only; move a
                                                                        # name up into STRATEGIES once it proves itself
-STRATEGY_PAIRS = {"Daily Break": ["EUR/USD", "GBP/USD", "XAU/USD"], "London Breakout": ["EUR/USD", "GBP/USD", "XAU/USD"]}
+STRATEGY_PAIRS = {"Daily Break": ["XAU/USD"],   # the --widen test: only gold held up (t 3.7); the forex pairs were around zero or negative
+                   "London Breakout": ["EUR/USD", "GBP/USD", "XAU/USD"]}
 LIVE_INTERVAL, LIVE_MINUTES, LIVE_COUNT = "30min", 30, 1200   # live signals use 30-minute candles (about 25 days of history)
 M30_ONLY = ["Daily Break"]   # built for 30-minute candles, so the hourly --backtest/--sweep skip it (see --lab)  # live pairs per strategy (tests use all pairs)
 LONDON_FILTER = True   # London Breakout only trades with the 200 EMA trend (price on that side AND the EMA sloping that way)
@@ -1653,8 +1654,13 @@ def lab_prepare(df, minutes):
     atr = tr.ewm(alpha=1 / ATR_PERIOD, adjust=False).mean()
     ef = c.ewm(span=50 * k, adjust=False).mean()
     es = c.ewm(span=200 * k, adjust=False).mean()
+    mid, sd = c.rolling(20).mean(), c.rolling(20).std(ddof=0)
+    delta = c.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
     dts = df["datetime"]
     return {
+        "bbu": (mid + 2 * sd).values, "bbl": (mid - 2 * sd).values, "rsi": (100 - 100 / (1 + gain / loss)).values,
         "k": k, "o": df["open"].values, "h": h.values, "l": l.values, "c": c.values,
         "atr": atr.values, "atr_h": (atr * (k ** 0.5)).values, "ef": ef.values, "es": es.values,
         "es_old": es.shift(10 * k).values, "dt": dts, "days": dts.dt.date.values,
@@ -1789,7 +1795,47 @@ def lab_daily_break(d, live=False, end_min=None):
     return out
 
 
-LAB_FUNCS = {"Pullback": lab_pullback, "Sweep Reversal": lab_sweep_reversal,
+def lab_asian_fade(d):
+    """Quiet Asian hours: fade a stretch beyond the Bollinger band once price closes back inside it."""
+    out = []
+    c, o, h, l, atr = d["c"], d["o"], d["h"], d["l"], d["atr"]
+    for i in range(30, d["n"] - 1):
+        if not (0 <= d["mod"][i] < 360) or not atr[i] > 0:
+            continue
+        if c[i - 1] < d["bbl"][i - 1] and c[i] > d["bbl"][i] and c[i] > o[i] and d["rsi"][i - 1] < 35:
+            side, sl = "BUY", l[i - 2:i + 1].min() - 0.2 * atr[i]
+        elif c[i - 1] > d["bbu"][i - 1] and c[i] < d["bbu"][i] and c[i] < o[i] and d["rsi"][i - 1] > 65:
+            side, sl = "SELL", h[i - 2:i + 1].max() + 0.2 * atr[i]
+        else:
+            continue
+        sl = lab_fix_risk(side, c[i], sl, 0.5 * atr[i], 2.5 * atr[i])
+        if sl is not None:
+            out.append((i, side, sl))
+    return out
+
+
+def lab_momentum(d):
+    """A big candle closing near its high/low, in the direction of the trend, during London/New York hours."""
+    out = []
+    c, o, h, l, atr = d["c"], d["o"], d["h"], d["l"], d["atr"]
+    for i in range(300, d["n"] - 1):
+        if not (420 <= d["mod"][i] <= 1020) or not atr[i - 1] > 0:
+            continue
+        rng = h[i] - l[i]
+        if rng <= 0 or abs(c[i] - o[i]) < 1.3 * atr[i - 1]:
+            continue
+        if c[i] > o[i] and (c[i] - l[i]) / rng >= 0.75 and lab_trend(d, i, "BUY"):
+            side, sl = "BUY", c[i] - 1.5 * atr[i - 1]
+        elif c[i] < o[i] and (h[i] - c[i]) / rng >= 0.75 and lab_trend(d, i, "SELL"):
+            side, sl = "SELL", c[i] + 1.5 * atr[i - 1]
+        else:
+            continue
+        out.append((i, side, sl))
+    return out
+
+
+IDEA_STRATEGIES = ["Pullback", "Asian Fade", "Momentum Bar"]
+LAB_FUNCS = {"Asian Fade": lab_asian_fade, "Momentum Bar": lab_momentum, "Pullback": lab_pullback, "Sweep Reversal": lab_sweep_reversal,
              "NY Breakout": lab_ny_breakout, "Daily Break": lab_daily_break}
 
 
@@ -1818,13 +1864,34 @@ def lab_evaluate(inst, d, cands, minutes, a, b):
     return out
 
 
-def run_lab():
+GOLD_FILE = Path("state/gold.txt")
+
+
+def run_gold():
+    run_lab(["XAU/USD"], GOLD_FILE, "GOLD LAB (XAU/USD only)")
+
+
+IDEAS_FILE = Path("state/ideas.txt")
+
+
+def run_ideas():
+    pairs = [i["name"] for i in INSTRUMENTS if i["kind"] == "forex"]
+    run_lab(pairs, IDEAS_FILE, "IDEAS LAB (all 7 pairs)", IDEA_STRATEGIES, [30])
+
+
+def run_lab(pairs=None, out_file=None, title="STRATEGY LAB (3 pairs pooled)", strategies=None, minutes_list=None):
+    pairs = pairs or TF_PAIRS
+    out_file = out_file or LAB_FILE
+    pair_strats = strategies or ["Daily Break"]
+    strategies = strategies or LAB_STRATEGIES
+    minutes_list = minutes_list or TF_MINUTES
     rows = {}   # (strategy, minutes, target) -> trades
     by_pair = {}   # (strategy, minutes, pair) -> trades at the 1/2 target
+    day_counts = {}   # minutes -> trading days per pair
     for inst in INSTRUMENTS:
-        if inst["name"] not in TF_PAIRS:
+        if inst["name"] not in pairs:
             continue
-        for minutes in TF_MINUTES:
+        for minutes in minutes_list:
             try:
                 time.sleep(8)
                 df = fetch_tf(inst["symbol"], minutes, TF_PAGES[minutes])
@@ -1832,7 +1899,8 @@ def run_lab():
                 print(f"Could not fetch {inst['name']} {minutes}m: {str(e)[:150]}")
                 continue
             d = lab_prepare(df, minutes)
-            for strat in LAB_STRATEGIES:
+            day_counts.setdefault(minutes, []).append(max(1, len(lab_day_groups(d))))
+            for strat in strategies:
                 cands = LAB_FUNCS[strat](d)
                 for tgt in LAB_TARGETS:
                     res = lab_evaluate(inst, d, cands, minutes, *tgt)
@@ -1840,14 +1908,15 @@ def run_lab():
                     if tgt == (1.0, 2.0):
                         by_pair[(strat, minutes, inst["name"])] = res
             print(f"{inst['name']} {minutes}m done ({len(df)} candles)")
-    lines = ["==== STRATEGY LAB (after typical spreads, 3 pairs pooled) ====",
+    lines = [f"==== {title}, after typical spreads ====",
+             "'sig/d' = signals per day (all pairs in this table added together).",
              "Half closes at TP1, stop to entry, rest runs to TP2. 'hrs' = average hours a trade stays open.",
              "'good' = t of 3+, positive in BOTH the early 70% and late 30%, 30+ trades.",
              "Many variants are tried here, so a lucky winner is likely. Trust only 'good' rows with similar neighbours."]
-    for strat in LAB_STRATEGIES:
+    for strat in strategies:
         lines += ["", f"-- {strat} --",
-                  f"{'entry':>5s} {'TP1/TP2':>8s} {'trades':>6s} {'win%':>5s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s} {'hrs':>5s}"]
-        for minutes in TF_MINUTES:
+                  f"{'entry':>5s} {'TP1/TP2':>8s} {'trades':>6s} {'sig/d':>5s} {'win%':>5s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s} {'hrs':>5s}"]
+        for minutes in minutes_list:
             for tgt in LAB_TARGETS:
                 t = rows.get((strat, minutes, tgt), [])
                 if not t:
@@ -1859,20 +1928,21 @@ def run_lab():
                 ts = t_score([x[1] for x in t])
                 good = "  good" if early > 0 and late > 0 and n >= 30 and ts >= 3 else ""
                 lines.append(f"{minutes:>4d}m {tgt[0]:g}/{tgt[1]:g}".ljust(15)
-                             + f"{n:6d} {100 * sum(1 for x in t if x[2]) / n:5.0f} {tot / n:+8.2f} {ts:5.1f} "
+                             + f"{n:6d} {n / (sum(day_counts[minutes]) / len(day_counts[minutes])):5.2f} {100 * sum(1 for x in t if x[2]) / n:5.0f} {tot / n:+8.2f} {ts:5.1f} "
                              f"{early:+8.1f} {late:+8.1f} {sum(x[3] for x in t) / n:5.1f}{good}")
     lines += ["", "-- PER PAIR (TP1/TP2 1/2): is one pair carrying the result? --",
               f"{'strategy':15s} {'entry':>5s} {'pair':8s} {'trades':>6s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
     for (strat, minutes, pair), t in sorted(by_pair.items()):
-        if strat != "Daily Break" or not t:
+        if strat not in pair_strats or not t:
             continue
+        good = ""
         n = len(t)
         lines.append(f"{strat:15s} {minutes:>4d}m {pair:8s} {n:6d} {sum(x[1] for x in t) / n:+8.2f} "
                      f"{t_score([x[1] for x in t]):5.1f} {sum(x[1] for x in t if x[0]):+8.1f} {sum(x[1] for x in t if not x[0]):+8.1f}")
     text = "\n".join(lines)
     print(text)
-    LAB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LAB_FILE.write_text(text + "\n")
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(text + "\n")
 
 
 # ---------- Images: signal charts ----------
@@ -2192,12 +2262,22 @@ WIDEN_FILE = Path("state/widen.txt")
 WIDEN_ENDS = [(960, "until 17:00 Nigeria time (today)"), (1200, "until 21:00 Nigeria time")]
 
 
-def run_widen():
+MARKETS_FILE = Path("state/markets.txt")
+EXTRA_MARKETS = ["XAG/USD", "BTC/USD", "ETH/USD", "WTI/USD"]   # tested with --markets (silver, bitcoin, ethereum, oil)
+SPREADS.update({"XAG/USD": 0.03, "BTC/USD": 20.0, "ETH/USD": 1.5, "WTI/USD": 0.03})   # rough typical spreads
+
+
+def run_markets():
+    insts = [{"name": m, "kind": "forex", "symbol": m} for m in EXTRA_MARKETS]
+    run_widen(insts, MARKETS_FILE, "MARKETS TEST: Daily Break on other markets")
+
+
+def run_widen(insts=None, out_file=None, title="WIDEN TEST: Daily Break"):
+    insts = insts or [i for i in INSTRUMENTS if i["kind"] == "forex"]
+    out_file = out_file or WIDEN_FILE
     results = {}   # (end_min, pair) -> trades
     days = {}      # pair -> number of trading days in the data
-    for inst in INSTRUMENTS:
-        if inst["kind"] != "forex":
-            continue
+    for inst in insts:
         try:
             time.sleep(8)
             df = fetch_tf(inst["symbol"], 30, TF_PAGES[30])
@@ -2210,7 +2290,7 @@ def run_widen():
             cands = lab_daily_break(d, end_min=end_min)
             results[(end_min, inst["name"])] = lab_evaluate(inst, d, cands, 30, 1.0, 2.0)
         print(f"{inst['name']}: {len(df)} candles, {days[inst['name']]} days")
-    lines = ["==== WIDEN TEST: Daily Break, 30-minute entries, TP1 1:1 / TP2 1:2, after spreads ====",
+    lines = [f"==== {title}, 30-minute entries, TP1 1:1 / TP2 1:2, after spreads ====",
              "'sig/day' = average signals per day on that pair. 'good' = t of 3+, positive early AND late, 30+ trades."]
     for end_min, label in WIDEN_ENDS:
         lines += ["", f"-- Window: {label} --",
@@ -2236,8 +2316,8 @@ def run_widen():
     lines += ["", "More pairs mean more signals, but only add a pair if it holds up on its own (positive early and late)."]
     text = "\n".join(lines)
     print(text)
-    WIDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    WIDEN_FILE.write_text(text + "\n")
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(text + "\n")
 
 
 # ---------- Main ----------
@@ -2251,6 +2331,15 @@ def main():
         return
     if "--sweep" in sys.argv:
         run_sweep()
+        return
+    if "--ideas" in sys.argv:
+        run_ideas()
+        return
+    if "--markets" in sys.argv:
+        run_markets()
+        return
+    if "--gold" in sys.argv:
+        run_gold()
         return
     if "--widen" in sys.argv:
         run_widen()
