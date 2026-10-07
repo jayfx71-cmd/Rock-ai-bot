@@ -1864,6 +1864,100 @@ def lab_evaluate(inst, d, cands, minutes, a, b):
     return out
 
 
+def lab_daily_break_late(d):
+    """Same as Daily Break but entries allowed until 20:00 UTC."""
+    return lab_daily_break(d, end_min=1200)
+
+
+def lab_daily_break_free(d):
+    """Daily Break without the trend filter: more signals, but fewer 'with the trend' trades."""
+    out = []
+    prev = None
+    for day, idx in sorted(lab_day_groups(d).items()):
+        if prev is not None:
+            hi, lo = d["h"][prev].max(), d["l"][prev].min()
+            for i in idx:
+                if i >= d["n"] - 1:
+                    break
+                if not (420 <= d["mod"][i] <= DAILY_END_MIN):
+                    continue
+                c, ah = d["c"][i], d["atr_h"][i]
+                if not ah > 0:
+                    break
+                if c > hi or c < lo:
+                    side = "BUY" if c > hi else "SELL"
+                    out.append((i, side, c - 1.5 * ah if side == "BUY" else c + 1.5 * ah))
+                    break
+        prev = idx
+    return out
+
+
+def lab_daily_break_multi(d):
+    """Daily Break, then up to 2 more trend-following signals the same day when price makes a new day high/low."""
+    out, k = [], d["k"]
+    prev = None
+    for day, idx in sorted(lab_day_groups(d).items()):
+        if prev is not None:
+            hi, lo = d["h"][prev].max(), d["l"][prev].min()
+            fired, last_i = 0, -999
+            for pos, i in enumerate(idx):
+                if i >= d["n"] - 1 or fired >= 3:
+                    break
+                if not (420 <= d["mod"][i] <= 1080):
+                    continue
+                c, ah = d["c"][i], d["atr_h"][i]
+                if not ah > 0:
+                    break
+                if fired == 0:
+                    side = "BUY" if c > hi else ("SELL" if c < lo else None)
+                else:
+                    if i - last_i < 2 * k:
+                        continue
+                    td_hi, td_lo = d["h"][idx[:pos]].max(), d["l"][idx[:pos]].min()
+                    side = "BUY" if c > td_hi else ("SELL" if c < td_lo else None)
+                if side and lab_trend(d, i, side):
+                    out.append((i, side, c - 1.5 * ah if side == "BUY" else c + 1.5 * ah))
+                    fired += 1
+                    last_i = i
+                elif side and fired == 0:
+                    break
+        prev = idx
+    return out
+
+
+def lab_asia_break(d):
+    """Break of the Asian-session range (00:00-07:00 UTC) during London/New York, with the trend."""
+    out, k = [], d["k"]
+    for day, idx in sorted(lab_day_groups(d).items()):
+        asia = idx[d["mod"][idx] < 420]
+        win = idx[(d["mod"][idx] >= 420) & (d["mod"][idx] <= DAILY_END_MIN)]
+        if len(asia) < 5 * k or len(win) == 0:
+            continue
+        hi, lo = d["h"][asia].max(), d["l"][asia].min()
+        for i in win:
+            if i >= d["n"] - 1:
+                break
+            c, ah = d["c"][i], d["atr_h"][i]
+            if not ah > 0:
+                break
+            if c > hi or c < lo:
+                side = "BUY" if c > hi else "SELL"
+                if lab_trend(d, i, side):
+                    out.append((i, side, c - 1.5 * ah if side == "BUY" else c + 1.5 * ah))
+                break
+    return out
+
+
+MORE_STRATEGIES = ["Daily Break", "Break Late", "Break No Filter", "Break Multi", "Asia Break"]
+LAB_FUNCS.update({"Break Late": lab_daily_break_late, "Break No Filter": lab_daily_break_free,
+                  "Break Multi": lab_daily_break_multi, "Asia Break": lab_asia_break})
+MORE_FILE = Path("state/more.txt")
+
+
+def run_more():
+    run_lab(["XAU/USD"], MORE_FILE, "GOLD MORE SIGNALS (XAU/USD)", MORE_STRATEGIES, [60, 30])
+
+
 GOLD_FILE = Path("state/gold.txt")
 
 
@@ -2395,6 +2489,102 @@ def run_wide():
     WIDE_FILE.write_text(text + "\n")
 
 
+GOLDMORE_FILE = Path("state/goldmore.txt")
+
+
+def lab_break_variant(d, ref="prev", start=420, end=960, cont=False, trend="full", sl_mult=1.5):
+    """Daily-Break family on one instrument. ref: 'prev' = yesterday's range, 'asia' = today's 00-07 UTC range.
+    cont: keep looking after a break that fails the trend filter. trend: 'full' (price vs EMA and slope), 'price' (price vs EMA only), 'off'."""
+    out, prev = [], None
+    for day, idx in sorted(lab_day_groups(d).items()):
+        if ref == "prev":
+            rng_idx = prev
+        else:
+            rng_idx = idx[d["hour"][idx] < 7]
+            if len(rng_idx) < 8:
+                rng_idx = None
+        prev = idx
+        if rng_idx is None or len(rng_idx) == 0:
+            continue
+        hi, lo = d["h"][rng_idx].max(), d["l"][rng_idx].min()
+        for i in idx:
+            if i >= d["n"] - 1:
+                break
+            if not (start <= d["mod"][i] <= end):
+                continue
+            c, ah = d["c"][i], d["atr_h"][i]
+            if not ah > 0:
+                break
+            if c > hi or c < lo:
+                side = "BUY" if c > hi else "SELL"
+                if trend == "full":
+                    ok = lab_trend(d, i, side)
+                elif trend == "price":
+                    e = d["es"][i]
+                    ok = e == e and ((c > e) if side == "BUY" else (c < e))
+                else:
+                    ok = True
+                if ok:
+                    out.append((i, side, c - sl_mult * ah if side == "BUY" else c + sl_mult * ah))
+                    break
+                if not cont:
+                    break
+    return out
+
+
+GOLDMORE_VARIANTS = [
+    ("A. Keep looking after a counter-trend break", dict(ref="prev", cont=True)),
+    ("B. Looser trend filter (price vs trend line only)", dict(ref="prev", cont=True, trend="price")),
+    ("C. Longer window (05:00-20:00 UTC)", dict(ref="prev", cont=True, start=300, end=1200)),
+    ("D. Asian-range break (a different setup)", dict(ref="asia", cont=True)),
+    ("E. Asian-range break, longer window", dict(ref="asia", cont=True, start=300, end=1200)),
+]
+
+
+def run_goldmore():
+    inst = next(i for i in INSTRUMENTS if i["name"] == "XAU/USD")
+    rows = []
+    for minutes in (30, 60):
+        time.sleep(8)
+        df = fetch_tf(inst["symbol"], minutes, TF_PAGES[minutes])
+        d = lab_prepare(df, minutes)
+        ndays = max(1, len(lab_day_groups(d)))
+        base = lab_break_variant(d)
+        base_i = {c[0] for c in base}
+        bt = lab_evaluate(inst, d, base, minutes, 1.0, 2.0)
+        rows.append((minutes, "BASE: what is live now", len(bt), len(bt) / ndays, bt))
+        for label, kw in GOLDMORE_VARIANTS:
+            cands = lab_break_variant(d, **kw)
+            allr = lab_evaluate(inst, d, cands, minutes, 1.0, 2.0)
+            extra = [c for c in cands if c[0] not in base_i]
+            ext = lab_evaluate(inst, d, extra, minutes, 1.0, 2.0)
+            rows.append((minutes, label + " (all signals)", len(allr), len(allr) / ndays, allr))
+            rows.append((minutes, label + " (ONLY the extra ones)", len(ext), len(ext) / ndays, ext))
+        print(f"{minutes}m done ({len(df)} candles, {ndays} days)")
+    lines = ["==== MORE GOLD SIGNALS (XAU/USD), after spreads, TP1 1:1 / TP2 1:2, stop 1.5x ====",
+             "'extra' = signals the live setup does not already give. Those must pass ON THEIR OWN, otherwise they only add noise.",
+             "'good' = t of 3+, positive early AND late, 30+ trades. 'per wk' = signals per week (5 trading days).", ""]
+    cur = None
+    for minutes, label, n, per_day, t in rows:
+        if minutes != cur:
+            cur = minutes
+            lines += [f"-- {minutes}-minute entries --",
+                      f"{'setup':58s} {'trades':>6s} {'per wk':>6s} {'R/trade':>8s} {'t':>5s} {'early R':>8s} {'late R':>8s}"]
+        if n == 0:
+            lines.append(f"{label:58s} {0:6d}")
+            continue
+        early, late = sum(x[1] for x in t if x[0]), sum(x[1] for x in t if not x[0])
+        ts = t_score([x[1] for x in t])
+        good = "  good" if early > 0 and late > 0 and n >= 30 and ts >= 3 else ""
+        lines.append(f"{label:58s} {n:6d} {per_day * 5:6.1f} {sum(x[1] for x in t) / n:+8.2f} {ts:5.1f} {early:+8.1f} {late:+8.1f}{good}")
+        if "ONLY the extra" in label:
+            lines.append("")
+    text = "\n".join(lines)
+    print(text)
+    GOLDMORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    GOLDMORE_FILE.write_text(text + "\n")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -2415,6 +2605,12 @@ def main():
         return
     if "--gold" in sys.argv:
         run_gold()
+        return
+    if "--goldmore" in sys.argv:
+        run_goldmore()
+        return
+    if "--more" in sys.argv:
+        run_more()
         return
     if "--wide" in sys.argv:
         run_wide()
