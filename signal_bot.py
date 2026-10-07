@@ -60,7 +60,7 @@ SPREADS = {            # typical spread in price units (round trip is paid once)
 }
 ALL_STRATEGIES = [x for x in STRATEGIES + RESEARCH_STRATEGIES if x not in M30_ONLY]
 STRATEGY_KINDS = {"London Breakout": ("forex",), "Mean Reversion": ("forex",), "Daily Break": ("forex",)}  # others run on everything
-STRATEGY_TARGETS = {"London Breakout": (1.0, 2.0), "Mean Reversion": (1.0, 1.5), "Daily Break": (1.0, 2.0)}  # (TP1, TP2) in R; others use TP1_R/TP2_R
+STRATEGY_TARGETS = {"London Breakout": (1.0, 2.0), "Mean Reversion": (1.0, 1.5), "Daily Break": (1.0, 2.0), "Vol Break": (1.0, 2.0)}  # (TP1, TP2) in R; others use TP1_R/TP2_R
 BB_PERIOD = 20
 SESSION_START, SESSION_END = 7, 11   # London Breakout: signals only when the candle opens 07:00-11:00 UTC
 ASIA_RANGE_HOURS = 7                 # overnight range = candles opening 00:00-06:00 UTC
@@ -580,27 +580,70 @@ def t_score(values):
     return mean / ((var / n) ** 0.5) if var > 0 else 0.0
 
 
-def walk_trade(side, entry, sl, tp1, tp2, highs, lows):
+def walk_trade(side, entry, sl, tp1, tp2, highs, lows, buf=0.0):
     """Walk candles forward. Returns (result, index, tp1_hit).
     result: "SL", "TP1" (TP1 hit, rest stopped at break-even), "TP2", or None (still open).
-    When one candle could have hit both the stop and a target, the stop is counted (conservative)."""
+    When one candle could have hit both the stop and a target, the stop is counted (conservative).
+    buf = the broker spread in price units (live trades only). A broker fills a BUY target at the bid and a SELL target
+    at the ask, so a target counts only once price is a full spread beyond it, and stops count half a spread early."""
     buy = side == "BUY"
+    half = buf / 2
     stage = 0
     for j in range(len(highs)):
         h, l = highs[j], lows[j]
         if stage == 0:
-            if (l <= sl) if buy else (h >= sl):
+            if (l <= sl + half) if buy else (h >= sl - half):
                 return "SL", j, False
-            if (h >= tp1) if buy else (l <= tp1):
+            if (h >= tp1 + buf) if buy else (l <= tp1 - buf):
                 stage = 1
-                if (h >= tp2) if buy else (l <= tp2):
+                if (h >= tp2 + buf) if buy else (l <= tp2 - buf):
                     return "TP2", j, True
         else:
-            if (l <= entry) if buy else (h >= entry):
+            if (l <= entry + half) if buy else (h >= entry - half):
                 return "TP1", j, True
-            if (h >= tp2) if buy else (l <= tp2):
+            if (h >= tp2 + buf) if buy else (l <= tp2 - buf):
                 return "TP2", j, True
     return None, None, stage == 1
+
+
+# ---------- Live progress updates (pips made so far) ----------
+PROGRESS_UPDATES = True
+PIP_STEPS = [5, 10, 20, 25, 50, 100, 200, 500]
+
+
+def pip_step(risk_pips):
+    """Update every ~quarter of the stop distance, rounded to a tidy number (forex ~5-10 pips, gold ~50)."""
+    target = risk_pips / 4
+    return next((x for x in PIP_STEPS if x >= target), PIP_STEPS[-1])
+
+
+def progress_note(t, after, prefix=""):
+    """Message when a trade has reached a new profit step, or is halfway to its stop. Marks it in the trade so it is sent once."""
+    if not PROGRESS_UPDATES or len(after) == 0 or not t.get("risk_pips"):
+        return None
+    unit_px = abs(t["entry"] - t["sl"]) / t["risk_pips"]
+    if unit_px <= 0:
+        return None
+    buy = t["side"] == "BUY"
+    last = float(after["close"].iloc[-1])
+    best = (float(after["high"].max()) - t["entry"]) if buy else (t["entry"] - float(after["low"].min()))
+    now_ = (last - t["entry"]) if buy else (t["entry"] - last)
+    best_p, now_p = best / unit_px, now_ / unit_px
+    step = pip_step(t["risk_pips"])
+    unit = t.get("unit", "pips")
+    mile = int(best_p // step) * step
+    head = f"{prefix}<b>Trade update</b> · {t['side']} {t['pair']}"
+    if mile > t.get("milestone", 0) and mile > 0:
+        t["milestone"] = mile
+        nxt = ("TP1", t["tp1_r"] * t["risk_pips"]) if not t.get("tp1_notified") else ("TP2", t["tp2_r"] * t["risk_pips"])
+        left = max(0.0, nxt[1] - now_p)
+        return (f"📈 {head}\n+{now_p:.0f} {unit} right now (best so far +{best_p:.0f})\n"
+                f"{nxt[0]} is about {left:.0f} {unit} away.")
+    if now_p <= -0.5 * t["risk_pips"] and not t.get("warned"):
+        t["warned"] = True
+        return (f"⚠️ {head}\nPrice is {abs(now_p):.0f} {unit} against us, about half way to the stop loss. "
+                f"Keep your stop where it is.")
+    return None
 
 
 def resolve_open(state, candles):
@@ -617,7 +660,7 @@ def resolve_open(state, candles):
         a, b = t.get("tp1_r", 4.0), t.get("tp2_r", 4.0)
         after = df[df["datetime"] > pd.Timestamp(t["candle"])]
         result, _, tp1_hit = walk_trade(t["side"], t["entry"], t["sl"], tp1, tp2,
-                                        after["high"].values, after["low"].values)
+                                        after["high"].values, after["low"].values, buf=SPREADS.get(t["pair"], 0.0))
 
         if result is None:
             opened = datetime.fromisoformat(t["opened_at"])
@@ -632,6 +675,10 @@ def resolve_open(state, candles):
                         f"🎯 <b>TP1 hit:</b> {t['side']} {t['pair']} ({t['strategy']})\n"
                         f"Close half and move your stop to entry. The rest runs to TP2."
                     )
+            elif t.get("live", True):
+                note = progress_note(t, after)
+                if note:
+                    send(note)
             still_open.append(t)
             continue
 
@@ -2068,7 +2115,7 @@ def fetch_deriv_tf(symbol, minutes, pages):
     return df[df["datetime"] + timedelta(minutes=minutes) <= datetime.utcnow()].reset_index(drop=True)
 
 
-def lab_vol_break(d, multi=False):
+def lab_vol_break(d, multi=False, live=False):
     """Daily Break for markets that never close: yesterday's high/low (UTC day), any hour, with the trend."""
     out, k = [], d["k"]
     prev = None
@@ -2077,7 +2124,7 @@ def lab_vol_break(d, multi=False):
             hi, lo = d["h"][prev].max(), d["l"][prev].min()
             fired, last_i = 0, -999
             for pos, i in enumerate(idx):
-                if i >= d["n"] - 1 or fired >= (3 if multi else 1):
+                if i >= d["n"] - (0 if live else 1) or fired >= (3 if multi else 1):
                     break
                 c, ah = d["c"][i], d["atr_h"][i]
                 if not ah > 0:
@@ -2214,38 +2261,61 @@ def _plt():
 
 
 def _theme():
-    return dict(bg1="#05080f", bg2="#0c1628", panel="#0b1424", edge="#1e3050", fg="#eaf2ff", dim="#7f93b2",
-                up="#00e5a8", down="#ff4d6d", amber="#ffb020", blue="#4da3ff", cyan="#22d3ee",
+    return dict(bg1="#020a0e", bg2="#06232b", panel="#06171d", edge="#1b6670", fg="#e6fbfa", dim="#78a8af",
+                up="#19e6b0", down="#ff5c7a", amber="#ffc14d", blue="#38b6ff", cyan="#1fd8d0",
                 mono="DejaVu Sans Mono", sans="DejaVu Sans")
 
 
+def _spaced(text):
+    """'OWN YOUR EDGE' -> 'O W N   Y O U R   E D G E' (the wide-letter tagline look)."""
+    return "   ".join(" ".join(w) for w in text.split())
+
+
 def _canvas(plt, w, h, accent):
-    """Figure with a gradient background and a soft coloured glow in the top-right corner. Drawing units are inches."""
+    """Dark teal stage: soft glow behind the card, a light beam on the floor, faint dot texture. Units are inches."""
     from matplotlib.colors import LinearSegmentedColormap, to_rgb
     t = _theme()
     fig = plt.figure(figsize=(w, h), dpi=150)
     bg = fig.add_axes([0, 0, 1, 1])
     bg.axis("off")
+    bg.set_autoscale_on(False)
     grad = np.linspace(1, 0, 256).reshape(-1, 1)
     bg.imshow(grad, extent=[0, w, 0, h], cmap=LinearSegmentedColormap.from_list("bg", [t["bg2"], t["bg1"]]),
               aspect="auto", zorder=0)
-    yy, xx = np.mgrid[0:1:160j, 0:1:240j]
-    rr = np.sqrt(((xx - 0.93) * 1.7) ** 2 + (yy - 1.0) ** 2)
-    rgba = np.zeros((160, 240, 4))
+    yy, xx = np.mgrid[0:1:200j, 0:1:300j]
+    rgba = np.zeros((200, 300, 4))
     rgba[..., :3] = to_rgb(accent)
-    rgba[..., 3] = np.clip(1 - rr / 0.95, 0, 1) ** 2 * 0.30
+    rr = np.sqrt(((xx - 0.5) * 1.5) ** 2 + (yy - 0.98) ** 2)
+    glow = np.clip(1 - rr / 0.9, 0, 1) ** 2 * 0.34                      # big soft glow at the top
+    beam = np.exp(-(((xx - 0.5) / 0.30) ** 2) - (((yy - 0.028) / 0.017) ** 2)) * 0.85   # thin light on the floor
+    haze = np.exp(-(((xx - 0.5) / 0.46) ** 2) - (((yy - 0.028) / 0.065) ** 2)) * 0.20
+    rgba[..., 3] = np.clip(glow + beam + haze, 0, 0.95)
     bg.imshow(rgba, extent=[0, w, 0, h], aspect="auto", zorder=1, origin="lower")
+    gx, gy = np.meshgrid(np.arange(0.2, w, 0.26), np.arange(0.2, h, 0.26))   # faint dot texture
+    bg.scatter(gx.ravel(), gy.ravel(), s=0.5, color=t["fg"], alpha=0.07, linewidths=0, zorder=1.5)
     bg.set_xlim(0, w)
     bg.set_ylim(0, h)
     return fig, bg, t
 
 
 def _panel(bg, x, y, w, h, t, accent=None, r=0.14):
+    """Glass panel: soft outer glow, translucent body, bright rim, diagonal sheen."""
     from matplotlib.patches import FancyBboxPatch
-    bg.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}", fc=t["panel"],
-                                ec=t["edge"], lw=1.0, alpha=0.92, zorder=2))
+    rim = accent or t["edge"]
+    for lw, a in ((9, 0.05), (5, 0.08), (2.6, 0.12)):
+        bg.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}", fc="none", ec=rim,
+                                    lw=lw, alpha=a, zorder=2))
+    body = FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}", fc=t["panel"], ec=rim,
+                          lw=1.1, alpha=0.86, zorder=2.2)
+    bg.add_patch(body)
+    sheen = np.zeros((40, 80, 4))
+    sheen[..., :3] = 1.0
+    gy, gx = np.mgrid[0:1:40j, 0:1:80j]
+    sheen[..., 3] = np.clip(1 - (gx * 0.75 + (1 - gy) * 0.55), 0, 1) ** 2 * 0.14
+    im = bg.imshow(sheen, extent=[x, x + w, y, y + h], aspect="auto", zorder=2.4, origin="lower")
+    im.set_clip_path(body)
     if accent:
-        bg.plot([x + r, x + w - r], [y + h, y + h], color=accent, lw=2.2, alpha=0.95, zorder=3, solid_capstyle="round")
+        bg.plot([x + r, x + w - r], [y + h, y + h], color=accent, lw=2.0, alpha=0.95, zorder=3, solid_capstyle="round")
 
 
 def _pill(bg, x, y, w, h, color, text, fs=10, tc="#04110d", t=None):
@@ -2279,12 +2349,24 @@ def _glow(color, w=6, a=0.2):
     return [_pe().Stroke(linewidth=w, foreground=color, alpha=a), _pe().Normal()]
 
 
-def _card(bg, x, y, w, h, t, label, value, sub, color):
+def _dots(bg, x, y, width, color, lit, n=16, size=7):
+    """A row of dots, the first `lit` share of them bright (dot-matrix gauge)."""
+    xs = np.linspace(x, x + width, n)
+    k = int(round(max(0.0, min(1.0, lit)) * n))
+    bg.scatter(xs[:k], [y] * k, s=size, color=color, linewidths=0, alpha=0.95, zorder=5)
+    bg.scatter(xs[k:], [y] * (n - k), s=size, color=color, linewidths=0, alpha=0.20, zorder=5)
+
+
+def _card(bg, x, y, w, h, t, label, value, sub, color, lit=None):
     _panel(bg, x, y, w, h, t, accent=color, r=0.10)
-    bg.text(x + 0.14, y + h - 0.16, label, color=t["dim"], fontsize=6.8, fontweight="bold", va="center", family=t["sans"], zorder=5)
-    bg.text(x + 0.14, y + h / 2 - 0.03, value, color=color, fontsize=12.5, fontweight="bold", va="center", family=t["mono"], zorder=5)
-    if sub:
+    bg.text(x + 0.14, y + h - 0.17, label, color=t["dim"], fontsize=6.6, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    bg.text(x + 0.14, y + h / 2 - 0.02, value, color=color, fontsize=12.5, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    if lit is not None:
+        _dots(bg, x + 0.16, y + 0.17, w - 0.34, color, lit)
+    elif sub:
         bg.text(x + 0.14, y + 0.15, sub, color=t["dim"], fontsize=6.8, va="center", family=t["sans"], zorder=5)
+    if lit is not None and sub:
+        bg.text(x + w - 0.14, y + h - 0.17, sub, color=t["dim"], fontsize=6.4, va="center", ha="right", family=t["mono"], zorder=5)
 
 
 def _candles(ax, plt, d, t):
@@ -2325,22 +2407,25 @@ def _tag(ax, x, price, text, color, t, fg="#04110d"):
 
 
 def make_signal_chart(s, df, path="signal_chart.png"):
-    """Neon-on-dark chart: candles, profit/loss zones, glowing entry/SL/TP lines, and a stat strip underneath."""
+    """Glass-card signal: candles with profit/loss zones, glowing levels, and four numbered stat tiles with dot gauges."""
     plt = _plt()
-    W, H = 9.0, 5.1
-    side_col = _theme()["up"] if s["side"] == "BUY" else _theme()["down"]
-    fig, bg, t = _canvas(plt, W, H, side_col)
+    W, H = 9.0, 5.7
+    t = _theme()
+    side_col = t["up"] if s["side"] == "BUY" else t["down"]
+    fig, bg, t = _canvas(plt, W, H, t["cyan"])
+    exp = bool(s.get("exp"))
     # header
-    _pill(bg, 0.35, 4.42, 0.92, 0.38, side_col, s["side"], fs=12, t=t)
-    bg.text(1.45, 4.62, s["pair"], color=t["fg"], fontsize=22, fontweight="bold", va="center", family=t["mono"], zorder=5)
-    bg.text(0.37, 4.2, f"{s['strategy'].upper()}   ·   30M   ·   VIP SIGNAL", color=t["dim"], fontsize=7.6,
-            fontweight="bold", va="center", family=t["sans"], zorder=5)
-    _wordmark(fig, bg, W - 0.4, 4.62, t, side_col)
+    _pill(bg, 0.4, H - 0.78, 0.95, 0.38, side_col, s["side"], fs=12, t=t)
+    bg.text(1.5, H - 0.58, s["pair"], color=t["fg"], fontsize=22, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    bg.text(0.42, H - 0.98, f"{s['strategy'].upper()}  ·  30M  ·  {'EXPERIMENTAL SIGNAL' if exp else 'VIP SIGNAL'}",
+            color=t["dim"], fontsize=7.6, fontweight="bold", va="center", family=t["mono"], zorder=5)
+    _wordmark(fig, bg, W - 0.4, H - 0.58, t, t["cyan"])
     # chart panel
-    _panel(bg, 0.3, 1.62, W - 0.6, 2.42, t)
+    py0, ph = 2.02, 2.62
+    _panel(bg, 0.3, py0, W - 0.6, ph, t, accent=t["cyan"])
     d = df.tail(CHART_CANDLES).reset_index(drop=True)
     n, pad = len(d), 12
-    ax = fig.add_axes([0.62 / W, 1.78 / H, 6.55 / W, 2.1 / H])
+    ax = fig.add_axes([0.62 / W, (py0 + 0.16) / H, 6.55 / W, (ph - 0.32) / H])
     _style_axes(ax, t)
     _candles(ax, plt, d, t)
     entry, sl, tp1, tp2 = s["entry"], s["sl"], s["tp1"], s["tp2"]
@@ -2364,17 +2449,20 @@ def make_signal_chart(s, df, path="signal_chart.png"):
     dec = len(str(s["entry"]).split(".")[-1])
     for lab, price, col in (("TP2", tp2, t["up"]), ("TP1", tp1, t["up"]), ("ENTRY", entry, t["fg"]), ("SL", sl, t["down"])):
         _tag(ax, x1 + 0.7, price, f"{lab} {price:.{dec}f}", col, t)
-    # stat strip
-    cw, gap, y0, ch = (W - 0.6 - 3 * 0.14) / 4, 0.14, 0.52, 0.92
+    # stat tiles (dot gauge = size of the move compared with 3R)
+    cw, gap, y0, ch = (W - 0.6 - 3 * 0.14) / 4, 0.14, 0.78, 1.0
     unit = s["unit"]
-    cards = [("ENTRY", f"{entry:.{dec}f}", "30-minute close", t["fg"]),
-             ("STOP LOSS", f"{sl:.{dec}f}", f"-{s['risk_pips']} {unit}", t["down"]),
-             ("TP1  ·  1:%g" % s["tp1_r"], f"{tp1:.{dec}f}", f"+{round(s['risk_pips'] * s['tp1_r'], 1)} {unit}", t["up"]),
-             ("TP2  ·  1:%g" % s["tp2_r"], f"{tp2:.{dec}f}", f"+{round(s['risk_pips'] * s['tp2_r'], 1)} {unit}", t["up"])]
-    for k, (lab, val, sub, col) in enumerate(cards):
-        _card(bg, 0.3 + k * (cw + gap), y0, cw, ch, t, lab, val, sub, col)
-    bg.text(W / 2, 0.24, "Risk 1% max per trade  ·  At TP1 close half and move your stop to entry  ·  Trade at your own risk",
-            color=t["dim"], fontsize=6.6, ha="center", va="center", family=t["sans"], zorder=5)
+    cards = [("01  ENTRY", f"{entry:.{dec}f}", "30m close", t["fg"], None),
+             ("02  STOP LOSS", f"{sl:.{dec}f}", f"-{s['risk_pips']} {unit}", t["down"], 1.0 / 3),
+             ("03  TP1 · 1:%g" % s["tp1_r"], f"{tp1:.{dec}f}", f"+{round(s['risk_pips'] * s['tp1_r'], 1)} {unit}", t["up"], s["tp1_r"] / 3),
+             ("04  TP2 · 1:%g" % s["tp2_r"], f"{tp2:.{dec}f}", f"+{round(s['risk_pips'] * s['tp2_r'], 1)} {unit}", t["up"], s["tp2_r"] / 3)]
+    for k, (lab, val, sub, col, lit) in enumerate(cards):
+        _card(bg, 0.3 + k * (cw + gap), y0, cw, ch, t, lab, val, sub, col, lit)
+    foot = ("Experimental, unverified  ·  Risk 0.25% max  ·  At TP1 close half and move your stop to entry" if exp
+            else "Risk 1% max per trade  ·  At TP1 close half and move your stop to entry  ·  Trade at your own risk")
+    bg.text(W / 2, 0.60, foot, color=t["dim"], fontsize=6.6, ha="center", va="center", family=t["sans"], zorder=5)
+    bg.text(W / 2, 0.36, _spaced("TRADE THE PLAN."), color=t["cyan"], fontsize=6.8, ha="center", va="center",
+            family=t["mono"], alpha=0.9, zorder=5)
     fig.savefig(path, facecolor=t["bg1"])
     plt.close(fig)
     return path
@@ -2412,7 +2500,7 @@ def make_levels_chart(panels, title, path="levels_chart.png"):
     plt = _plt()
     n_p = len(panels)
     W, ph = 9.0, 2.75
-    H = 1.35 + ph * n_p + 0.15
+    H = 1.35 + ph * n_p + 0.65
     fig, bg, t = _canvas(plt, W, H, _theme()["cyan"])
     _pill(bg, 0.35, H - 0.72, 2.0, 0.38, t["cyan"], "LEVELS TO WATCH", fs=10, t=t)
     bg.text(2.55, H - 0.53, title.split("·")[-1].strip(), color=t["fg"], fontsize=12, fontweight="bold", va="center", family=t["mono"], zorder=5)
@@ -2441,8 +2529,10 @@ def make_levels_chart(panels, title, path="levels_chart.png"):
         ax.set_ylim(min(lows) - span * 0.08, max(highs) + span * 0.08)
         ax.set_xlim(-1, m + 6.5)
         ax.set_xticks([])
-    bg.text(W / 2, 0.12, "No breakout means no trade. Waiting is part of the plan.", color=t["dim"], fontsize=7.4,
+    bg.text(W / 2, 0.62, "No breakout means no trade. Waiting is part of the plan.", color=t["dim"], fontsize=7.4,
             ha="center", va="center", family=t["sans"], zorder=5)
+    bg.text(W / 2, 0.36, _spaced("WAIT FOR THE EDGE."), color=t["cyan"], fontsize=6.8, ha="center", va="center",
+            family=t["mono"], alpha=0.9, zorder=5)
     fig.savefig(path, facecolor=t["bg1"])
     plt.close(fig)
     return path
@@ -2459,7 +2549,7 @@ def make_recap_card(title, rows, tiles, path="recap_card.png"):
         for part in (textwrap.wrap(text, 70) or [""]):
             lines.append((part, kind))
     W = 8.2
-    H = 2.6 + 0.36 * len(lines)
+    H = 3.1 + 0.36 * len(lines)
     fig, bg, t = _canvas(plt, W, H, t0["cyan"])
     _pill(bg, 0.35, H - 0.72, 1.55, 0.38, t["cyan"], "DAY RECAP", fs=10, t=t)
     bg.text(2.1, H - 0.53, title.split("·")[-1].strip(), color=t["fg"], fontsize=12, fontweight="bold", va="center", family=t["mono"], zorder=5)
@@ -2472,6 +2562,8 @@ def make_recap_card(title, rows, tiles, path="recap_card.png"):
         bg.text(0.45, y, text, color=t[colors.get(kind, "fg")], fontsize=9.5 if kind in ("win", "loss", "flat") else 8.6,
                 fontweight="bold" if kind in ("win", "loss", "flat") else "normal", va="center", family=t["mono"] if kind in ("win", "loss", "flat") else t["sans"], zorder=5)
         y -= 0.36
+    bg.text(W / 2, 0.36, _spaced("OWN YOUR NUMBERS."), color=t["cyan"], fontsize=6.8, ha="center", va="center",
+            family=t["mono"], alpha=0.9, zorder=5)
     fig.savefig(path, facecolor=t["bg1"])
     plt.close(fig)
     return path
@@ -2740,6 +2832,166 @@ def run_goldmore():
     GOLDMORE_FILE.write_text(text + "\n")
 
 
+# ---------- EXPERIMENTAL section: Volatility indices (kept completely apart from the main record) ----------
+EXP_ENABLED = True
+EXP_FILE = Path("state/experimental.json")
+EXP_INDICES = {"Volatility 75": "R_75", "Volatility 75 (1s)": "1HZ75V", "Volatility 25": "R_25", "Volatility 100": "R_100"}
+EXP_WINDOW, EXP_MIN, EXP_PAUSE_R, EXP_RESUME_R = 20, 10, -5.0, -1.0   # auto-pause when the last 20 trades are -5R or worse
+EXP_MAX_PER_DAY = 4
+EXP_RISK = "0.25% max per trade"
+
+
+def exp_load():
+    try:
+        st = json.loads(EXP_FILE.read_text())
+    except Exception:
+        st = {}
+    for k, v in (("open", []), ("closed", []), ("last_signal", {}), ("paused", False), ("announced", False)):
+        st.setdefault(k, v)
+    return st
+
+
+def exp_save(st):
+    EXP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    EXP_FILE.write_text(json.dumps(st, indent=2))
+
+
+def exp_record_line(st):
+    posted = [t for t in st["closed"] if t.get("live", True)]
+    w, l, rate, r = record(posted)
+    if w + l == 0:
+        return "🧪 Experimental record: building (no closed trades yet)"
+    return f"🧪 Experimental record: {w}W / {l}L ({rate:.0f}%) | {r:+.1f}R"
+
+
+def exp_paused(st):
+    done = sorted([t for t in st["closed"] if t["result"] in SCORED], key=lambda t: t.get("closed_at", ""))[-EXP_WINDOW:]
+    if len(done) < EXP_MIN:
+        return False
+    total = sum(t["r"] for t in done)
+    return (total < EXP_RESUME_R) if st["paused"] else (total < EXP_PAUSE_R)
+
+
+def exp_resolve(st, candles):
+    now, still = datetime.now(timezone.utc), []
+    for t in st["open"]:
+        df = candles.get(t["pair"])
+        if df is None:
+            still.append(t)
+            continue
+        after = df[df["datetime"] > pd.Timestamp(t["candle"])]
+        result, _, tp1_hit = walk_trade(t["side"], t["entry"], t["sl"], t["tp1"], t["tp2"], after["high"].values, after["low"].values)
+        if result is None and now - datetime.fromisoformat(t["opened_at"]) > timedelta(hours=EXPIRE_HOURS):
+            result = "TP1" if tp1_hit else "EXPIRED"
+        if result is None:
+            if tp1_hit and not t.get("tp1_notified"):
+                t["tp1_notified"] = True
+                if t.get("live", True):
+                    send(f"🧪 <b>Experimental · TP1 hit:</b> {t['side']} {t['pair']}\nClose half and move your stop to entry. The rest runs to TP2.")
+            elif t.get("live", True):
+                note = progress_note(t, after, "🧪 ")
+                if note:
+                    send(note)
+            still.append(t)
+            continue
+        t["result"], t["r"], t["closed_at"] = result, trade_r(result, t["tp1_r"], t["tp2_r"]), now.isoformat()
+        st["closed"].append(t)
+        if t.get("live", True):
+            label = {"TP2": "✅ TP2 hit (full target)", "TP1": "🟡 TP1 hit, rest stopped at break-even",
+                     "SL": "❌ SL hit", "EXPIRED": "⏱ Expired"}[result]
+            send(f"🧪 <b>Experimental</b> · {label}: <b>{t['side']} {t['pair']}</b>\nResult: {t['r']:+.1f}R\n\n{exp_record_line(st)}")
+    st["open"] = still
+
+
+def exp_signal(inst, df):
+    """Daily Break for markets that never close: first 30-minute close beyond yesterday's high/low, with the trend."""
+    if len(df) < 450:
+        return None
+    d = lab_prepare(df.reset_index(drop=True), 30)
+    cands = lab_vol_break(d, live=True)
+    if not cands or cands[-1][0] != d["n"] - 1:
+        return None
+    if datetime.utcnow() - df["datetime"].iloc[-1].to_pydatetime() > timedelta(hours=2):   # stale data
+        return None
+    i, side, sl = cands[-1]
+    sig = build_signal(inst, "Vol Break", side, float(d["c"][i]), sl, df["datetime"].iloc[-1])
+    sig["exp"] = True
+    return sig
+
+
+def format_exp(s, st):
+    arrow = "📈" if s["side"] == "BUY" else "📉"
+    return (
+        f"🧪 <b>{BRAND} EXPERIMENTAL SIGNAL</b>  ·  VOLATILITY INDEX\n\n"
+        f"<b>Index:</b> {s['pair']}\n"
+        f"<b>Direction:</b> {arrow} {s['side']}\n"
+        f"<b>Setup:</b> Daily Break (30-minute close beyond yesterday's high/low, with the trend)\n\n"
+        f"<b>Entry:</b> <code>{s['entry']}</code>\n"
+        f"<b>Stop Loss:</b> <code>{s['sl']}</code> ({s['risk_pips']} pts)\n"
+        f"<b>TP1 (1:{s['tp1_r']:g}):</b> <code>{s['tp1']}</code>\n"
+        f"<b>TP2 (1:{s['tp2_r']:g}):</b> <code>{s['tp2']}</code>\n\n"
+        f"<b>Risk:</b> {EXP_RISK}\n"
+        f"{exp_record_line(st)}\n\n"
+        f"⚠️ EXPERIMENTAL: our tests found no reliable edge on these indices yet. This is NOT part of the VIP record. "
+        f"Use very small size and treat it as a live test."
+    )
+
+
+EXP_INTRO = (
+    f"🧪 <b>{BRAND} EXPERIMENTAL SECTION</b>\n\n"
+    "We are starting a separate, clearly labelled test on the Volatility indices (V75, V75 1s, V25, V100). "
+    "These are posted with the tag 🧪 EXPERIMENTAL and tracked in their own record.\n\n"
+    "• Our back-tests showed NO reliable edge here, so this is a live test, not a recommendation.\n"
+    "• It is NOT part of the VIP record (that stays gold only).\n"
+    "• Use tiny size (0.25% risk or less). If the last 20 trades are -5R or worse, the section pauses itself."
+)
+
+
+def run_experimental(now):
+    if not EXP_ENABLED:
+        return
+    st = exp_load()
+    insts = [{"name": n, "kind": "synthetic", "symbol": sym} for n, sym in EXP_INDICES.items()]
+    candles = {}
+    for inst in insts:
+        try:
+            candles[inst["name"]] = fetch_deriv_tf(inst["symbol"], 30, 1)
+        except Exception as e:
+            print(f"Experimental: could not fetch {inst['name']}: {str(e)[:150]}")
+    if not candles:
+        return
+    exp_resolve(st, candles)
+    st["paused"] = exp_paused(st)
+    if not st["announced"] and not st["paused"]:
+        send(EXP_INTRO)
+        st["announced"] = True
+    today = now.strftime("%Y-%m-%d")
+    posted_today = sum(1 for t in st["open"] + st["closed"] if t.get("live", True) and str(t.get("opened_at", ""))[:10] == today)
+    for inst in insts:
+        df = candles.get(inst["name"])
+        if df is None or any(t["pair"] == inst["name"] for t in st["open"]):
+            continue
+        sig = exp_signal(inst, df)
+        if not sig or st["last_signal"].get(inst["name"]) == sig["candle"]:
+            continue
+        sig["live"] = (not st["paused"]) and posted_today < EXP_MAX_PER_DAY
+        if sig["live"]:
+            send_signal(sig, format_exp(sig, st), add_indicators(df))
+            posted_today += 1
+        else:
+            print(f"Experimental shadow trade (not posted): {inst['name']} {sig['side']} @ {sig['entry']}")
+        st["open"].append(sig)
+        st["last_signal"][inst["name"]] = sig["candle"]
+    exp_save(st)
+
+
+def run_experimental_safe(now):
+    try:
+        run_experimental(now)
+    except Exception as e:   # the experimental section must never stop the main signals
+        print(f"Experimental step failed: {str(e)[:200]}")
+
+
 # ---------- Main ----------
 def main():
     if "--test" in sys.argv:
@@ -2880,6 +3132,7 @@ def main():
                 combo_active(state, key, backtest)
     save_state(state)
     print_leaderboard(state, backtest, cuts)
+    run_experimental_safe(now)
     print("Run complete.")
 
 
