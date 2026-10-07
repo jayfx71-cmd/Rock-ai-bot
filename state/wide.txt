@@ -1,0 +1,47 @@
+==== WIDE-STOP TEST: Daily Break on the 7 forex pairs, after spreads ====
+Stop = number of hourly ATRs. Wider stop = spread is a smaller share of each trade.
+'sig/d' = signals per day, all 7 pairs together. 'good' = t of 3+, positive early AND late, 30+ trades.
+
+entry  stop  TP1/TP2 trades sig/d  R/trade     t  early R   late R
+  30m  1.5x 1/2        1807  2.57    -0.02  -0.9    -25.9    -16.2
+  30m  1.5x 1/3        1730  2.46    -0.02  -0.9    -25.8    -15.2
+  30m  1.5x 2/3        1641  2.33    -0.03  -0.7    -27.2    -15.0
+  30m  2.5x 1/2        1456  2.07    -0.01  -0.4     +7.1    -25.4
+  30m  2.5x 1/3        1326  1.88    -0.02  -0.6     +1.0    -24.9
+  30m  2.5x 2/3        1205  1.71    -0.01  -0.1    +12.9    -19.0
+  30m  3.5x 1/2        1143  1.62    -0.01  -0.4     -0.3    -14.9
+  30m  3.5x 1/3         997  1.42    -0.01  -0.2     +7.9    -14.2
+  30m  3.5x 2/3         884  1.26    -0.03  -0.6    -24.1     -1.9
+  60m  1.5x 1/2        1785  2.54    -0.05  -1.8    -41.1    -42.3
+  60m  1.5x 1/3        1699  2.42    -0.04  -1.5    -34.7    -37.4
+  60m  1.5x 2/3        1618  2.30    -0.02  -0.6     -3.3    -33.4
+  60m  2.5x 1/2        1447  2.06    -0.01  -0.4     +4.8    -19.8
+  60m  2.5x 1/3        1300  1.85    +0.01   0.3    +24.2    -12.4
+  60m  2.5x 2/3        1180  1.68    -0.02  -0.4     +0.6    -20.9
+  60m  3.5x 1/2        1128  1.60    +0.01   0.2    +16.2     -9.3
+  60m  3.5x 1/3         988  1.41    +0.01   0.4    +27.0    -12.8
+  60m  3.5x 2/3         873  1.24    -0.01  -0.3    -10.1     -0.5
+
+-- PER PAIR for the best pooled row (60m, stop 3.5x, 1/3) --
+pair     trades  R/trade     t  early R   late R
+EUR/USD     144    -0.03  -0.3     -1.4     -2.2
+GBP/USD     149    -0.05  -0.5     -4.5     -2.3
+USD/JPY     143    -0.00  -0.0     +8.9     -9.2
+AUD/USD     141    -0.11  -1.2    -11.4     -4.2
+USD/CAD     138    +0.11   1.2    +11.3     +4.1
+GBP/JPY     133    -0.16  -1.7    -15.3     -5.6
+XAU/USD     140    +0.33   3.4    +39.4     +6.7  good
+
+-- ANY single pair that passed on its own (best first) --
+XAU/USD   30m stop 2.5x 1/2: 205 trades, +0.29R each, t 3.7
+XAU/USD   60m stop 3.5x 1/2: 170 trades, +0.31R each, t 3.7
+XAU/USD   30m stop 1.5x 1/3: 235 trades, +0.28R each, t 3.6
+XAU/USD   30m stop 1.5x 1/2: 250 trades, +0.25R each, t 3.6
+XAU/USD   60m stop 1.5x 1/2: 249 trades, +0.25R each, t 3.5
+XAU/USD   60m stop 3.5x 1/3: 140 trades, +0.33R each, t 3.4
+XAU/USD   60m stop 2.5x 2/3: 164 trades, +0.42R each, t 3.4
+XAU/USD   60m stop 2.5x 1/2: 211 trades, +0.25R each, t 3.4
+XAU/USD   30m stop 3.5x 1/3: 133 trades, +0.34R each, t 3.3
+XAU/USD   60m stop 2.5x 1/3: 184 trades, +0.27R each, t 3.2
+XAU/USD   30m stop 2.5x 1/3: 178 trades, +0.28R each, t 3.2
+XAU/USD   30m stop 2.5x 2/3: 167 trades, +0.39R each, t 3.2
