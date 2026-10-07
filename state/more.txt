@@ -1,0 +1,63 @@
+==== GOLD MORE SIGNALS (XAU/USD), after typical spreads ====
+'sig/d' = signals per day (all pairs in this table added together).
+Half closes at TP1, stop to entry, rest runs to TP2. 'hrs' = average hours a trade stays open.
+'good' = t of 3+, positive in BOTH the early 70% and late 30%, 30+ trades.
+Many variants are tried here, so a lucky winner is likely. Trust only 'good' rows with similar neighbours.
+
+-- Daily Break --
+entry  TP1/TP2 trades sig/d  win%  R/trade     t  early R   late R   hrs
+  60m 1/1.5       255  0.36    61    +0.23   3.5    +44.9    +12.8   7.2  good
+  60m 1/2         248  0.35    60    +0.25   3.6    +46.1    +16.1   8.7  good
+  60m 2/3         234  0.33    45    +0.32   3.1    +51.9    +23.6  14.7  good
+  30m 1/1.5       253  0.36    61    +0.21   3.2    +29.9    +23.0   7.3  good
+  30m 1/2         250  0.35    60    +0.24   3.4    +31.7    +27.7   8.5  good
+  30m 2/3         233  0.33    42    +0.29   2.7    +41.7    +24.8  13.9
+
+-- Break Late --
+entry  TP1/TP2 trades sig/d  win%  R/trade     t  early R   late R   hrs
+  60m 1/1.5       274  0.39    61    +0.22   3.5    +49.6    +11.2   7.4  good
+  60m 1/2         267  0.38    60    +0.25   3.6    +50.3    +15.2   8.9  good
+  60m 2/3         249  0.35    45    +0.33   3.3    +57.2    +25.4  14.4  good
+  30m 1/1.5       276  0.39    61    +0.20   3.2    +27.7    +26.5   7.4  good
+  30m 1/2         273  0.38    60    +0.23   3.5    +30.7    +32.2   8.6  good
+  30m 2/3         251  0.35    42    +0.30   2.9    +43.6    +31.1  13.9
+
+-- Break No Filter --
+entry  TP1/TP2 trades sig/d  win%  R/trade     t  early R   late R   hrs
+  60m 1/1.5       370  0.52    57    +0.14   2.5    +38.9    +11.3   7.0
+  60m 1/2         360  0.51    57    +0.15   2.6    +39.9    +13.6   8.6
+  60m 2/3         328  0.46    40    +0.16   1.9    +44.1     +9.3  15.0
+  30m 1/1.5       372  0.52    57    +0.12   2.3    +27.8    +18.2   6.8
+  30m 1/2         368  0.52    57    +0.14   2.4    +26.1    +23.8   8.2
+  30m 2/3         333  0.47    37    +0.11   1.3    +32.9     +3.9  13.6
+
+-- Break Multi --
+entry  TP1/TP2 trades sig/d  win%  R/trade     t  early R   late R   hrs
+  60m 1/1.5       317  0.45    61    +0.22   3.8    +59.0    +10.9   8.0  good
+  60m 1/2         293  0.41    59    +0.21   3.2    +48.3    +12.2   9.3  good
+  60m 2/3         264  0.37    44    +0.30   3.1    +63.5    +15.3  15.9  good
+  30m 1/1.5       317  0.45    61    +0.21   3.7    +43.1    +24.0   8.2  good
+  30m 1/2         295  0.42    60    +0.23   3.6    +41.5    +25.1   9.6  good
+  30m 2/3         261  0.37    42    +0.29   2.9    +53.2    +22.2  14.8
+
+-- Asia Break --
+entry  TP1/TP2 trades sig/d  win%  R/trade     t  early R   late R   hrs
+  60m 1/1.5       240  0.34    53    +0.03   0.5     +4.4     +3.3   5.9
+  60m 1/2         235  0.33    52    +0.02   0.4     +2.8     +3.0   7.1
+  60m 2/3         219  0.31    37    +0.12   1.1    +13.3    +12.1  14.4
+  30m 1/1.5       243  0.34    52    +0.03   0.4     -5.7    +12.4   5.5
+  30m 1/2         242  0.34    52    +0.03   0.5     -8.7    +16.6   6.9
+  30m 2/3         223  0.31    39    +0.12   1.2     +0.9    +25.2  13.5
+
+-- PER PAIR (TP1/TP2 1/2): is one pair carrying the result? --
+strategy        entry pair     trades  R/trade     t  early R   late R
+Asia Break        30m XAU/USD     242    +0.03   0.5     -8.7    +16.6
+Asia Break        60m XAU/USD     235    +0.02   0.4     +2.8     +3.0
+Break Late        30m XAU/USD     273    +0.23   3.5    +30.7    +32.2
+Break Late        60m XAU/USD     267    +0.25   3.6    +50.3    +15.2
+Break Multi       30m XAU/USD     295    +0.23   3.6    +41.5    +25.1
+Break Multi       60m XAU/USD     293    +0.21   3.2    +48.3    +12.2
+Break No Filter   30m XAU/USD     368    +0.14   2.4    +26.1    +23.8
+Break No Filter   60m XAU/USD     360    +0.15   2.6    +39.9    +13.6
+Daily Break       30m XAU/USD     250    +0.24   3.4    +31.7    +27.7
+Daily Break       60m XAU/USD     248    +0.25   3.6    +46.1    +16.1
