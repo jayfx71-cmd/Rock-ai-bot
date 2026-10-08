@@ -15,7 +15,8 @@
       "candle": "2026-10-08T17:30:00",
       "opened_at": "2026-10-08T18:25:14.557584+00:00",
       "live": true,
-      "exp": true
+      "exp": true,
+      "milestone": 75
     }
   ],
   "closed": [],
