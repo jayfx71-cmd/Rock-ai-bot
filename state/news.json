@@ -1,5 +1,5 @@
 {
-  "brief_date": "2026-10-07",
+  "brief_date": "2026-10-08",
   "alerted": [
     "2026-10-06T02:35:00-04:00|JPY|BOJ Gov Ueda Speaks",
     "2026-10-07T14:00:00-04:00|USD|FOMC Meeting Minutes"
@@ -198,13 +198,14 @@
     "https://www.fxstreet.com/news/polish-zloty-downtrend-eyes-448-on-firm-support-societe-generale-202610071111",
     "https://www.fxstreet.com/news/gold-falls-as-us-dollar-treasury-yields-rebound-ahead-of-fed-minutes-202610071045",
     "https://www.fxstreet.com/news/japanese-yen-funding-appeal-eroded-by-boj-hikes-rabobank-202610071318",
-    "https://investinglive.com/news/investinglive-european-session-wrap-treasury-yields-surge-stocks-slide-as-risk-mood-sours/"
+    "https://investinglive.com/news/investinglive-european-session-wrap-treasury-yields-surge-stocks-slide-as-risk-mood-sours/",
+    "https://www.fxstreet.com/news/euro-downside-risks-persist-toward-11140-against-us-dollar-uob-202610080621"
   ],
   "day": "2026-10-08",
-  "day_count": 0,
+  "day_count": 1,
   "lesson_date": "2026-10-07",
   "lesson_idx": 0,
   "levels_date": "2026-10-07",
   "recap_date": "2026-10-07",
-  "last_headline": "2026-10-07T14:23:15.152421+00:00"
+  "last_headline": "2026-10-08T06:29:19.382082+00:00"
 }
