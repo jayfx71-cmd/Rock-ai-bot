@@ -116,9 +116,14 @@ NFP_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD"]   # pairs used by the -
 NFP_PAGES = 7                  # pages of 5000 H1 candles to fetch for the --nfp test (about 5 years)
 NFP_FILE = Path("state/nfp.txt")
 HEADLINES_PER_RUN = 1       # one headline at a time, never a burst
-HEADLINE_GAP_MIN = 40        # and at least this many minutes between two headlines
+HEADLINE_GAP_MIN = 180        # and at least this many minutes between two headlines
 HEADLINE_MAX_AGE_H = 18      # skip headlines older than this
-HEADLINES_PER_DAY = 12
+HEADLINES_PER_DAY = 2          # only two news posts a day: one in the morning, one in the afternoon
+HEADLINE_SLOTS = [(7, 12), (14, 19)]   # UTC hours in which the 1st and the 2nd headline may go out
+# Signals: at most TWO a day for gold, one per slot (UTC minutes of the day). Nothing stays open overnight.
+SIGNAL_SLOTS = {"morning": (420, 660), "evening": (1020, 1110)}   # 08:00-12:00 and 18:00-19:30 Nigeria time
+LIVE_END_MIN = 1110
+DAY_END_HOUR_UTC = 20          # any trade still open from this hour is closed at the market price (21:00 Nigeria) before the recap
 STATE_FILE = Path("state/signals.json")
 BACKTEST_FILE = Path("state/backtest.json")
 # -----------------------------------------------------
@@ -476,6 +481,22 @@ def strategy_mean_reversion(inst, df):
     return build_signal(inst, "Mean Reversion", side, entry, sl, last.datetime)
 
 
+def signal_slot(candle_iso):
+    """'morning' / 'evening' if this candle is inside a signal slot, else None."""
+    t = pd.Timestamp(candle_iso)
+    m = t.hour * 60 + t.minute
+    for name, (a, b) in SIGNAL_SLOTS.items():
+        if a <= m <= b:
+            return name
+    return None
+
+
+def slot_used(state, slot, candle_iso):
+    day = str(candle_iso)[:10]
+    return any(t.get("live", True) and t.get("strategy") == "Daily Break" and str(t.get("candle", ""))[:10] == day
+               and signal_slot(t["candle"]) == slot for t in state["closed"] + state["open"])
+
+
 def strategy_daily_break(inst, df):
     """Live (tested as Break Multi): a 30-minute close beyond yesterday's high/low, then up to 2 more with-the-trend breaks of the day high/low (07:00-18:00 UTC)."""
     if len(df) < 450:
@@ -524,7 +545,7 @@ def format_signal(s, winrate_line):
 
 
 # ---------- Result tracking ----------
-SCORED = ("TP", "TP1", "TP2", "SL")   # "TP" = trades saved by the old single-target version
+SCORED = ("TP", "TP1", "TP2", "SL", "DAYEND")   # "TP" = trades saved by the old single-target version
 WINS = ("TP", "TP1", "TP2")
 
 
@@ -541,7 +562,7 @@ def trade_r(result, tp1_r, tp2_r):
 
 def record(trades):
     scored = [t for t in trades if t["result"] in SCORED]
-    wins = sum(1 for t in scored if t["result"] in WINS)
+    wins = sum(1 for t in scored if t["result"] in WINS or (t["result"] == "DAYEND" and t.get("r", 0) > 0))
     total_r = sum(t["r"] for t in trades)
     n = len(scored)
     rate = (wins / n * 100) if n else 0
@@ -667,6 +688,14 @@ def resolve_open(state, candles):
             if now - opened > timedelta(hours=EXPIRE_HOURS):
                 result = "TP1" if tp1_hit else "EXPIRED"
 
+        if result is None and now.hour >= DAY_END_HOUR_UTC and len(after):
+            result = "DAYEND"   # nothing stays open overnight: close at the last price
+            last = float(after["close"].iloc[-1])
+            sign = 1 if t["side"] == "BUY" else -1
+            cur = sign * (last - t["entry"]) / abs(t["entry"] - t["sl"])
+            t["close_price"] = round(last, 2)
+            t["dayend_r"] = round(0.5 * a + 0.5 * max(cur, 0.0), 2) if tp1_hit else round(max(cur, -1.0), 2)
+
         if result is None:
             if tp1_hit and not t.get("tp1_notified"):
                 t["tp1_notified"] = True
@@ -683,7 +712,7 @@ def resolve_open(state, candles):
             continue
 
         t["result"] = result
-        t["r"] = trade_r(result, a, b)
+        t["r"] = t["dayend_r"] if result == "DAYEND" else trade_r(result, a, b)
         t["closed_at"] = now.isoformat()
         state["closed"].append(t)
 
@@ -693,6 +722,7 @@ def resolve_open(state, candles):
                 "TP1": "🟡 TP1 hit, rest stopped at break-even",
                 "SL": "❌ SL hit",
                 "EXPIRED": "⏱ Expired",
+                "DAYEND": "⏰ Closed for the day (nothing stays open overnight)",
             }[result]
             send(
                 f"{label}: <b>{t['side']} {t['pair']}</b> ({t['strategy']})\n"
@@ -1347,7 +1377,9 @@ def run_news(force=False, repost=False):
     # 2) headlines (daytime only, capped so the channel is not spammed)
     if news["day"] != today:
         news["day"], news["day_count"] = today, 0
-    if force or 6 <= now.hour < 21:
+    slot_ok = force or (news["day_count"] < len(HEADLINE_SLOTS) and
+                        HEADLINE_SLOTS[news["day_count"]][0] <= now.hour < HEADLINE_SLOTS[news["day_count"]][1])
+    if slot_ok and news["day_count"] < HEADLINES_PER_DAY or force:
         items = fetch_headlines()
         first_run = not news["seen"]
         fresh = [h for h in items if repost or h["link"] not in news["seen"]]
@@ -1440,7 +1472,7 @@ def run_extras(candles, state, now):
             save_news(news)
             head = f"📍 <b>{BRAND} LEVELS TO WATCH</b> · {now.astimezone(WAT):%a %d %b}"
             intro = ("Our Daily Break strategy waits for a 30-minute close beyond yesterday's high or low, "
-                     "in the direction of the trend (08:00 to 19:00 Nigeria time).")
+                     "in the direction of the trend (signals only come in the morning, 08:00 to 12:00, and the evening, 18:00 to 19:30 Nigeria time, at most one each, and everything is closed by 21:00).")
             full = f"{head}\n\n{intro} These are today's lines:\n\n" + "\n\n".join(blocks) \
                    + "\n\nNo breakout means no trade. Waiting is part of the plan."
             short = f"{head}\n\n{intro}\n\nNo breakout means no trade. Waiting is part of the plan."
@@ -1459,8 +1491,8 @@ def run_extras(candles, state, now):
         lines = [f"📊 <b>{BRAND} DAY RECAP</b> · {now.astimezone(WAT):%a %d %b}", ""]
         lines.append(f"Signals posted today: {len(opened)}")
         if closed:
-            icon = {"TP2": "✅", "TP1": "🟡", "SL": "❌", "EXPIRED": "⏱"}
-            word = {"TP2": "full target hit", "TP1": "half won, rest at break-even", "SL": "stopped out", "EXPIRED": "expired, no gain or loss"}
+            icon = {"TP2": "✅", "TP1": "🟡", "SL": "❌", "EXPIRED": "⏱", "DAYEND": "⏰"}
+            word = {"TP2": "full target hit", "TP1": "half won, rest at break-even", "SL": "stopped out", "EXPIRED": "expired, no gain or loss", "DAYEND": "closed at the end of the day"}
             lines += [f"{icon.get(t['result'], '•')} {t['side']} {t['pair']}: {t['r']:+.1f}R ({word.get(t['result'], '')})" for t in closed]
             lines.append(f"Closed today: {sum(t['r'] for t in closed):+.1f}R")
         if still:
@@ -1480,9 +1512,9 @@ def run_extras(candles, state, now):
         news["recap_date"] = today   # mark first, so a retry or a second run cannot post it twice
         save_news(news)
         rows = [("Signals posted today: %d" % len(opened), "head")]
-        kind_of = {"TP2": "win", "TP1": "win", "SL": "loss", "EXPIRED": "flat"}
+        kind_of = {"TP2": "win", "TP1": "win", "SL": "loss", "EXPIRED": "flat", "DAYEND": "info"}
         words = {"TP2": "full target hit", "TP1": "half won, rest at break-even", "SL": "stopped out",
-                 "EXPIRED": "expired, no gain or loss"}
+                 "EXPIRED": "expired, no gain or loss", "DAYEND": "closed at the end of the day"}
         for t in closed:
             rows.append((f"{t['side']} {t['pair']}   {t['r']:+.1f}R   {words.get(t['result'], '')}", kind_of.get(t["result"], "info")))
         if closed:
@@ -1950,7 +1982,7 @@ def lab_daily_break_multi(d, live=False):
             for pos, i in enumerate(idx):
                 if i >= d["n"] - (0 if live else 1) or fired >= 3:
                     break
-                if not (420 <= d["mod"][i] <= 1080):
+                if not (420 <= d["mod"][i] <= (LIVE_END_MIN if live else 1080)):
                     continue
                 c, ah = d["c"][i], d["atr_h"][i]
                 if not ah > 0:
@@ -2833,7 +2865,7 @@ def run_goldmore():
 
 
 # ---------- EXPERIMENTAL section: Volatility indices (kept completely apart from the main record) ----------
-EXP_ENABLED = True
+EXP_ENABLED = False   # experimental volatility section removed
 EXP_FILE = Path("state/experimental.json")
 EXP_INDICES = {"Volatility 75": "R_75", "Volatility 75 (1s)": "1HZ75V", "Volatility 25": "R_25", "Volatility 100": "R_100"}
 EXP_WINDOW, EXP_MIN, EXP_PAUSE_R, EXP_RESUME_R = 20, 10, -5.0, -1.0   # auto-pause when the last 20 trades are -5R or worse
@@ -3114,6 +3146,11 @@ def main():
             if any(t["pair"] == inst["name"] and t["strategy"] == strategy for t in state["open"]):
                 continue  # one open trade per instrument per strategy
             sig = STRATEGY_FUNCS[strategy](inst, df)
+            if sig and strategy == "Daily Break":
+                slot = signal_slot(sig["candle"])
+                if slot is None or slot_used(state, slot, sig["candle"]):
+                    print(f"Skipped {inst['name']} {sig['side']}: {'outside the signal slots' if slot is None else slot + ' signal already sent today'}")
+                    continue
             if sig and state["last_signal"].get(key) != sig["candle"]:
                 sig["live"] = combo_active(state, key, backtest)
                 if sig["live"]:
