@@ -16,7 +16,8 @@
       "opened_at": "2026-10-08T18:25:14.557584+00:00",
       "live": true,
       "exp": true,
-      "milestone": 75
+      "milestone": 75,
+      "tp1_notified": true
     }
   ],
   "closed": [],
