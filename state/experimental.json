@@ -1,7 +1,27 @@
 {
-  "open": [],
+  "open": [
+    {
+      "pair": "Volatility 75 (1s)",
+      "strategy": "Vol Break",
+      "side": "BUY",
+      "entry": 5182.62,
+      "sl": 5094.1662,
+      "tp1": 5271.0738,
+      "tp2": 5359.5276,
+      "tp1_r": 1.0,
+      "tp2_r": 2.0,
+      "risk_pips": 88.5,
+      "unit": "pts",
+      "candle": "2026-10-08T17:30:00",
+      "opened_at": "2026-10-08T18:25:14.557584+00:00",
+      "live": true,
+      "exp": true
+    }
+  ],
   "closed": [],
-  "last_signal": {},
+  "last_signal": {
+    "Volatility 75 (1s)": "2026-10-08T17:30:00"
+  },
   "paused": false,
   "announced": true
 }
