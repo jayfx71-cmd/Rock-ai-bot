@@ -3,7 +3,9 @@
   "alerted": [
     "2026-10-06T02:35:00-04:00|JPY|BOJ Gov Ueda Speaks",
     "2026-10-07T14:00:00-04:00|USD|FOMC Meeting Minutes",
-    "2026-10-08T08:15:00-04:00|GBP|BOE Gov Bailey Speaks"
+    "2026-10-08T08:15:00-04:00|GBP|BOE Gov Bailey Speaks",
+    "2026-10-09T08:30:00-04:00|CAD|Employment Change",
+    "2026-10-09T08:30:00-04:00|CAD|Unemployment Rate"
   ],
   "seen": [
     "https://www.fxstreet.com/news/the-japanese-yen-firms-on-a-boj-speech-about-ai-and-gives-it-all-back-202610052330",
@@ -216,8 +218,8 @@
   ],
   "day": "2026-10-09",
   "day_count": 1,
-  "lesson_date": "2026-10-08",
-  "lesson_idx": 1,
+  "lesson_date": "2026-10-09",
+  "lesson_idx": 2,
   "levels_date": "2026-10-09",
   "recap_date": "2026-10-08",
   "last_headline": "2026-10-09T07:23:15.868950+00:00"
