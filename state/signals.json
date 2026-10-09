@@ -1,5 +1,22 @@
 {
-  "open": [],
+  "open": [
+    {
+      "pair": "XAU/USD",
+      "strategy": "Daily Break",
+      "side": "BUY",
+      "entry": 4193.79,
+      "sl": 4174.57,
+      "tp1": 4213.0,
+      "tp2": 4232.22,
+      "tp1_r": 1.0,
+      "tp2_r": 2.0,
+      "risk_pips": 192.2,
+      "unit": "pips",
+      "candle": "2026-10-09T07:00:00",
+      "opened_at": "2026-10-09T07:51:22.124211+00:00",
+      "live": true
+    }
+  ],
   "closed": [
     {
       "pair": "USD/JPY",
@@ -123,7 +140,7 @@
     "EMA Cross|AUD/USD": "2026-10-05T10:00:00",
     "Price Action|USD/JPY": "2026-10-05T11:00:00",
     "Price Action|Volatility 25 (1s)": "2026-10-05T21:00:00",
-    "Daily Break|XAU/USD": "2026-10-07T12:00:00"
+    "Daily Break|XAU/USD": "2026-10-09T07:00:00"
   },
   "paused": {
     "EMA Cross|AUD/USD": true,
