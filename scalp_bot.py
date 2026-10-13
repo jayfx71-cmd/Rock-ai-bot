@@ -19,7 +19,8 @@ RATIOS = [2.0, 3.0]
 MAX_PER_RUN = 4
 GAP_MIN, GAP_MAX = 240, 420              # seconds between signals inside one run
 EXPIRE_MIN = 90                          # a scalp not finished in 90 minutes is closed at the market price
-SHOW_SESSION_SUMMARY = True
+SHOW_SESSION_SUMMARY = False   # the recap card shows the day's winning trades only; the full record stays in state/scalp.json
+RECAP_AFTER_MIN = 21 * 60 + 10   # 22:10 Nigeria time: open scalps are closed at the market price and the recap goes out
 
 
 def load():
@@ -147,7 +148,7 @@ def caption(tr):
             f"TP <code>{tr['tp']:.2f}</code>  (1:{tr['ratio']:g})")
 
 
-def resolve(s, df):
+def resolve(s, df, force_close=False):
     now = datetime.now(timezone.utc)
     done = []
     for tr in list(s["open"]):
@@ -159,7 +160,7 @@ def resolve(s, df):
                 res = "SL"; break                     # same candle touching both counts as a loss (cautious)
             if (hi >= tr["tp"]) if buy else (lo <= tr["tp"]):
                 res = "TP"; break
-        if res is None and (now - datetime.fromisoformat(tr["opened_at"])).total_seconds() > EXPIRE_MIN * 60:
+        if res is None and (force_close or (now - datetime.fromisoformat(tr["opened_at"])).total_seconds() > EXPIRE_MIN * 60):
             last = float(df["close"].iloc[-1]); sign = 1 if tr["side"] == "BUY" else -1
             r = max(min(sign * (last - tr["entry"]) / tr["risk"], tr["ratio"]), -1.0)
             tr["result"], tr["r"] = "TIMEOUT", round(r, 2)
@@ -205,15 +206,27 @@ def main():
     df = fetch()
     for t in s["open"]:
         t.setdefault("day", t["opened_at"][:10])
-    done = resolve(s, df)
+    force = now.hour * 60 + now.minute >= RECAP_AFTER_MIN
+    done = resolve(s, df, force_close=force)
     txt = results_text(done)
     if txt:
         b.send(txt)
+    if force and s["count"] and day not in s.setdefault("recap_days", []):
+        wins = [t for t in s["closed"] if t.get("day") == day and t["r"] > 0]
+        label = (now + timedelta(hours=1)).strftime("%a %d %b")
+        cap = f"\U0001F3C6 <b>ROCK AI DAY RECAP</b> \u00b7 {label}\n{len(wins)} winning trades today"
+        try:
+            import rock_recap
+            b.send_photo(rock_recap.render_recap(label, wins), cap)
+        except Exception as e:
+            print(f"Recap card failed, sending text: {str(e)[:150]}")
+            b.send(cap)
+        s["recap_days"].append(day)
     session, a, c = session_of(now)
     # session-end summary once, at the first run after the session closes
     for name, (sa, sc) in SESSIONS.items():
         key = f"{day}:{name}"
-        if now.hour * 60 + now.minute >= sc and key not in s["summary_sent"] and s["count"].get(name):
+        if SHOW_SESSION_SUMMARY and now.hour * 60 + now.minute >= sc and key not in s["summary_sent"] and s["count"].get(name):
             m = session_summary(s, name, day)
             if m and not [t for t in s["open"] if t["session"] == name]:
                 b.send(m); s["summary_sent"].append(key)
