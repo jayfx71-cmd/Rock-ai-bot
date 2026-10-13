@@ -83,7 +83,6 @@ def _rsi(s, n=7):
 def add_indicators(df):
     df = df.copy()
     c, h, l = df["close"], df["high"], df["low"]
-    # spot forex (XAU/USD) has no real volume — use candle range as a proxy
     if "volume" in df.columns and df["volume"].notna().any() and df["volume"].sum() > 0:
         v = df["volume"].astype(float)
     else:
@@ -383,7 +382,7 @@ def main():
                 n = sum(s["count"].values()) + 1
                 tr = make_trade(df, session, n, side, float(df.close.iloc[i]), sc)
                 tr["day"] = day
-                b.send_image_or_text(lambda: make_scalp_image(tr), caption(tr), caption=caption(tr))
+                b.send_image_or_text(lambda: make_scalp_image(tr), caption(tr))
                 s["open"].append(tr)
                 s["count"][session] = s["count"].get(session, 0) + 1
                 s.setdefault("used", []).append(key)
