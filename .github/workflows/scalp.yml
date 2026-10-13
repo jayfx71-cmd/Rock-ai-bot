@@ -1,34 +1,51 @@
-name: Gold scalps
+name: scalp
+
 on:
   schedule:
-    - cron: "10,40 * * * 1-5"
+    - cron: '7,37 6-21 * * 1-5'
   workflow_dispatch:
+
 concurrency:
   group: scalp
   cancel-in-progress: false
-permissions:
-  contents: write
+
 jobs:
   scalp:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - run: pip install -r requirements.txt
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: scalp-state-${{ github.run_id }}
+          restore-keys: |
+            scalp-state-
+
       - name: Run scalps
         env:
-          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCALP_CHAT_ID: ${{ secrets.SCALP_CHAT_ID }}
+          TD_KEY: ${{ secrets.TD_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python scalp_bot.py
+
       - name: Save state
         if: always()
-        run: |
-          git config user.name "bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add -A state
-          git diff --cached --quiet || git commit -m "scalp state"
-          for i in 1 2 3; do git pull --rebase && git push && break || sleep 5; done
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: scalp-state-${{ github.run_id }}
