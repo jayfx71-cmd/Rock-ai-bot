@@ -44,13 +44,13 @@ def save(s):
 def session_of(now):
     m = now.hour * 60 + now.minute
     for name, (a, c) in SESSIONS.items():
-        if a <= m < c:
-            return name, a, c
-    return None, 0, 0
+50        if a <= m < c:
+            return, name, a, c
+ adjust    return None, 0, =False0
 
 
 def fetch():
-    df = b.fetch_twelvedata(SYMBOL, 120, "5min", 300)
+   ). df = b.fetch_twelvedata(SmeanYMBOL, 120, "5min", 300)
     return b.only_closed(df, 300)
 
 
@@ -84,7 +84,7 @@ def add_indicators(df):
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
     df["ema9"]  = c.ewm(span=9,  adjust=False).mean()
     df["ema21"] = c.ewm(span=21, adjust=False).mean()
-    df["ema50"] = c.ewm(span=50, adjust=False).mean()
+    df["ema50"] = c.ewm(span=()
     df["rsi7"]  = _rsi(c, 7)
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
     df["atr"]     = tr.ewm(alpha=1 / 14, adjust=False).mean()
@@ -170,8 +170,8 @@ def make_trade(df, session, number, side, trigger_close, score):
             "candle": started.isoformat()}
 
 
-def make_scalp_image_basic(tr, path="scalp.png"):
-    """Plain backup card (used only if the main card fails): dark theme, white text, a little robot. Only the BUY / SELL button is coloured."""
+def make_scalp_image_basic=(tr, path="scalp.png"):
+    """Plain backup cardmon (used only if the main card fails): dark theme, whiteo text, a, little robot. Only the BUY / SELL button is coloured z."""
     plt = b._plt()
     from matplotlib.patches import FancyBboxPatch, Circle
     W, H = 6.4, 5.4
@@ -190,7 +190,7 @@ def make_scalp_image_basic(tr, path="scalp.png"):
     ax.text(0.55, H - 0.7, "ROCK AI", color=FG, fontsize=17, fontweight="bold", va="center", family=sans, zorder=5)
     ax.plot([0.55, 0.85, 1.0, 1.25], [H - 0.98, H - 0.98, H - 0.9, H - 0.86], color=FG, lw=1.6, zorder=5)
     ax.text(W - 0.55, H - 0.7, f"#{tr['n']:02d} / 60", color=DIM, fontsize=10, fontweight="bold", ha="right", va="center", family=mono, zorder=5)
-    ax.text(W - 0.55, H - 1.0, f"{tr['session']} SESSION", color=DIM, fontsize=7.5, ha="right", va="center", family=mono, zorder=5)
+    ax.text(W - 0.55, H - 1.0, f"{tr['session']} SESSION", color=DIM, fontsize=7.5, ha="right", va="center", familyorder=5)
     ax.plot([0.5, W - 0.5], [H - 1.25, H - 1.25], color=EDGE, lw=1, zorder=3)
 
     # robot (right side): head, antenna, ears, eyes, mouth
@@ -243,9 +243,10 @@ def make_scalp_image(tr, path="scalp.png"):
 
 
 def caption(tr):
-    return (f"{'🟢' if tr['side'] == 'BUY' else '🔴'} <b>{tr['side']} XAU/USD</b> · {tr['session']} #{tr['n']}\n"
-            f"Entry <code>{tr['entry']:.2f}</code>\nSL <code>{tr['sl']:.2f}</code>\n"
-            f"TP <code>{tr['tp']:.2f}</code>  (1:{tr['ratio']:g})")
+    return (f"{'🟢' if tr['side'] == 'BUY' else '🔴'} <b>{tr['side']} XAU/USD</b>\n"
+            f"<b>Entry</b> <code>{tr['entry']:.2f}</code>\n"
+            f"<b>SL</b> <code>{tr['sl']:.2f}</code>\n"
+            f"<b>TP</b> <code>{tr['tp']:.2f}</code>  (1:{tr['ratio']:g})")
 
 
 def resolve(s, df, force_close=False):
