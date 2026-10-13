@@ -73,7 +73,7 @@ ATR_PERIOD = 14
 SL_ATR_MULT = 1.5      # EMA Cross: stop loss = 1.5 x ATR
 TP1_R = 3.0            # first target = 3 x risk (1:3): close half, move stop to break-even
 TP2_R = 4.0            # second target = 4 x risk (1:4): the rest of the trade
-BRAND = "PIPPULSE"     # name shown at the top of every signal
+BRAND = "ROCK AI"     # name shown at the top of every signal
 CHANNEL_LINK = ""      # e.g. "https://t.me/yourchannel" -- leave empty to hide the link line
 EXPIRE_HOURS = 240     # close a trade as "expired" after this long (10 days)
 
@@ -98,7 +98,7 @@ DERIV_URLS = [  # tried in order; the first one that answers is used
 ]
 
 # --- news posts ---
-NEWS = True                    # False = signals only
+NEWS = False                   # False = signals only
 NEWS_FILE = Path("state/news.json")
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 FEEDS = [
