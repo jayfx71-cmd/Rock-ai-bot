@@ -27,6 +27,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Debug secrets present
+        run: |
+          if [ -z "$TD_KEY" ]; then echo "TD_KEY is EMPTY"; else echo "TD_KEY length: ${#TD_KEY}"; fi
+          if [ -z "$TWELVEDATA_API_KEY" ]; then echo "TWELVEDATA_API_KEY is EMPTY"; else echo "TWELVEDATA_API_KEY length: ${#TWELVEDATA_API_KEY}"; fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then echo "TELEGRAM_CHAT_ID is EMPTY"; else echo "TELEGRAM_CHAT_ID set"; fi
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "TELEGRAM_BOT_TOKEN is EMPTY"; else echo "TELEGRAM_BOT_TOKEN set"; fi
+        env:
+          TD_KEY: ${{ secrets.TD_KEY }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
@@ -37,9 +49,10 @@ jobs:
 
       - name: Run scalps
         env:
+          TD_KEY: ${{ secrets.TD_KEY }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SCALP_CHAT_ID: ${{ secrets.SCALP_CHAT_ID }}
-          TD_KEY: ${{ secrets.TD_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python scalp_bot.py
 
