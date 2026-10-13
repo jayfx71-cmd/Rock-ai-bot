@@ -1,4 +1,4 @@
-"""Fast-scalp signal generator for gold (XAU/USD). Random direction, 1:2 or 1:3 targets, about 60 a day,
+"""Fast-scalp signal generator for gold (XAU/USD). analyse for scalps, 1:2 or 1:3 targets, about 60 a day,
 split into morning / afternoon / evening sessions. Posts to your channel (TELEGRAM_CHAT_ID), or to a separate chat if you add a SCALP_CHAT_ID secret.
 Run every 30 minutes on weekdays: python scalp_bot.py"""
 import json, os, random, sys, time
@@ -52,6 +52,16 @@ def fetch():
     return b.only_closed(df, 300)
 
 
+def live_price(fallback):
+    """Latest price right now (not the last closed candle, which can be minutes old)."""
+    try:
+        r = b.requests.get("https://api.twelvedata.com/price", params={"symbol": SYMBOL, "apikey": b.TD_KEY}, timeout=20)
+        return float(r.json()["price"])
+    except Exception as e:
+        print(f"Live price failed, using the last candle close: {str(e)[:100]}")
+        return fallback
+
+
 def atr(df, n=14):
     h, l, c = df["high"], df["low"], df["close"]
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
@@ -59,7 +69,9 @@ def atr(df, n=14):
 
 
 def make_trade(df, session, number):
-    entry = float(df["close"].iloc[-1])
+    entry = live_price(float(df["close"].iloc[-1]))
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
+    started = now_naive - timedelta(minutes=now_naive.minute % 5)   # start of the 5-minute candle we are in
     risk = max(round(atr(df) * 1.0, 2), 1.5)           # stop about one 5-minute ATR, never tighter than $1.50
     ratio = random.choice(RATIOS)
     side = random.choice(["BUY", "SELL"])
@@ -67,7 +79,7 @@ def make_trade(df, session, number):
     return {"n": number, "session": session, "side": side, "entry": round(entry, 2),
             "sl": round(entry - sign * risk, 2), "tp": round(entry + sign * risk * ratio, 2),
             "ratio": ratio, "risk": risk, "opened_at": datetime.now(timezone.utc).isoformat(),
-            "candle": df["datetime"].iloc[-1].isoformat()}
+            "candle": started.isoformat()}
 
 
 def make_scalp_image_basic(tr, path="scalp.png"):
