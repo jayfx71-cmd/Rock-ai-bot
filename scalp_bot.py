@@ -16,7 +16,7 @@ SESSIONS = {"MORNING":   (6 * 60, 10 * 60 + 30),
             "EVENING":   (16 * 60, 21 * 60)}
 RATIOS = [2.0, 3.0]
 MAX_PER_RUN = 4
-GAP_MIN, GAP_MAX = 240, 420
+GAP_MIN, GAP_MAX = 20, 40      # seconds between signals in one run (short, so no signal goes stale while waiting)
 EXPIRE_MIN = 90
 SHOW_SESSION_SUMMARY = False
 RECAP_AFTER_MIN = 21 * 60 + 10
@@ -181,6 +181,9 @@ def make_trade(df, session, number, side, trigger_close, score):
     entry = live_price(trigger_close)
     sign = 1 if side == "BUY" else -1
     risk = max(round(atr(df) * 1.0, 2), 1.5)
+    if abs(entry - trigger_close) > 0.5 * risk:    # price already ran away from the setup: do not post it
+        print(f"Skipped {side}: price moved {abs(entry - trigger_close):.2f} since the setup")
+        return None
     ratio = 3.0 if score >= 55 else random.choice(RATIOS)
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
     started = now_naive - timedelta(minutes=now_naive.minute % 5)
@@ -326,6 +329,7 @@ def main():
         print("No chat id found. Check the TELEGRAM_CHAT_ID secret.")
         sys.exit(1)
     b.TG_CHAT = chat
+    b.TD_KEY = b.TD_KEY or os.environ.get("TD_KEY", "")   # accept the key from either secret name
     now = datetime.now(timezone.utc)
     if now.weekday() >= 5:
         print("Weekend: gold is closed.")
@@ -370,6 +374,7 @@ def main():
         if todo > 0:
             df = add_indicators(df)
             picks = pick_signals(df, s, todo)
+            trig = {k: float(df.close.iloc[i]) for (_, _, i, k, _) in picks}   # setup prices, taken before any refetch
             if not picks:
                 print(f"{session}: no fresh scored candles, slot skipped")
             for k, (sc, side, i, key, why) in enumerate(picks):
@@ -380,7 +385,10 @@ def main():
                     if resolve_msg:
                         b.send(resolve_msg)
                 n = sum(s["count"].values()) + 1
-                tr = make_trade(df, session, n, side, float(df.close.iloc[i]), sc)
+                tr = make_trade(df, session, n, side, trig[key], sc)
+                if tr is None:
+                    s.setdefault("used", []).append(key)
+                    continue
                 tr["day"] = day
                 b.send_image_or_text(lambda: make_scalp_image(tr), caption(tr))
                 s["open"].append(tr)
