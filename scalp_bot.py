@@ -1,4 +1,4 @@
-"""Fast-scalp signal generator for gold (XAU/USD). analyse for scalps, 1:2 or 1:3 targets, about 60 a day,
+"""Fast-scalp signal generator for gold (XAU/USD). Ranked setups (not random), 1:2 or 1:3 targets, about 60 a day,
 split into morning / afternoon / evening sessions. Posts to your channel (TELEGRAM_CHAT_ID), or to a separate chat if you add a SCALP_CHAT_ID secret.
 Run every 30 minutes on weekdays: python scalp_bot.py"""
 import json, os, random, sys, time
@@ -21,6 +21,7 @@ GAP_MIN, GAP_MAX = 240, 420              # seconds between signals inside one ru
 EXPIRE_MIN = 90                          # a scalp not finished in 90 minutes is closed at the market price
 SHOW_SESSION_SUMMARY = False   # the recap card shows the day's winning trades only; the full record stays in state/scalp.json
 RECAP_AFTER_MIN = 21 * 60 + 10   # 22:10 Nigeria time: open scalps are closed at the market price and the recap goes out
+SPREAD = 0.30                    # USD assumed round-trip cost on XAU/USD (used in scoring, not in resolve)
 
 
 def load():
@@ -29,13 +30,14 @@ def load():
     else:
         s = {}
     s.setdefault("day", ""); s.setdefault("count", {}); s.setdefault("open", []); s.setdefault("closed", [])
-    s.setdefault("summary_sent", [])
+    s.setdefault("summary_sent", []); s.setdefault("used", []); s.setdefault("recap_days", [])
     return s
 
 
 def save(s):
     STATE.parent.mkdir(parents=True, exist_ok=True)
     s["closed"] = s["closed"][-600:]
+    s["used"] = s.get("used", [])[-400:]
     STATE.write_text(json.dumps(s, indent=1))
 
 
@@ -68,17 +70,103 @@ def atr(df, n=14):
     return float(tr.rolling(n).mean().iloc[-1])
 
 
-def make_trade(df, session, number):
-    entry = live_price(float(df["close"].iloc[-1]))
+# ---------------- scoring engine ----------------
+
+def _rsi(s, n=7):
+    d = s.diff()
+    up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+    return 100 - 100 / (1 + up / dn.replace(0, 1e-9))
+
+
+def add_indicators(df):
+    df = df.copy()
+    c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    df["ema9"]  = c.ewm(span=9,  adjust=False).mean()
+    df["ema21"] = c.ewm(span=21, adjust=False).mean()
+    df["ema50"] = c.ewm(span=50, adjust=False).mean()
+    df["rsi7"]  = _rsi(c, 7)
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    df["atr"]     = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    df["atr_med"] = df["atr"].rolling(200, min_periods=30).median()
+    tp = (h + l + c) / 3
+    df["vwap"] = (tp * v).rolling(78, min_periods=20).sum() / v.rolling(78, min_periods=20).sum().replace(0, 1e-9)
+    df["vma"]  = v.rolling(20, min_periods=5).mean()
+    return df
+
+
+def score_at(df, i, side):
+    """0-100 score for a setup at candle i. Higher = better."""
+    if i < 55:
+        return 0.0, []
+    r, prev = df.iloc[i], df.iloc[i - 1]
+    sign = 1 if side == "BUY" else -1
+    s, why = 0.0, []
+
+    # A. Trend alignment (30)
+    if sign * (r.close - r.ema50) > 0:               s += 10; why.append("trend")
+    if sign * (r.ema9 - r.ema21) > 0:                s += 10; why.append("stack")
+    if sign * (r.ema50 - df.ema50.iloc[i - 5]) > 0:  s += 10; why.append("slope")
+
+    # B. Momentum (20)
+    if side == "BUY"  and r.rsi7 > 55:               s += 10; why.append(f"rsi{r.rsi7:.0f}")
+    if side == "SELL" and r.rsi7 < 45:               s += 10; why.append(f"rsi{r.rsi7:.0f}")
+    if sign * (r.ema9 - prev.ema9) > 0:              s += 10; why.append("push")
+
+    # C. Structure (25)
+    if side == "BUY"  and r.close > df.high.iloc[i - 20:i].max(): s += 15; why.append("brk")
+    if side == "SELL" and r.close < df.low.iloc[i - 20:i].min():  s += 15; why.append("brk")
+    if sign * (r.close - r.vwap) > 0 and sign * (prev.close - prev.vwap) <= 0:
+        s += 10; why.append("vwap")
+
+    # D. Volatility / spread (15, with penalty if too tight)
+    if r.atr > r.atr_med:                            s += 15; why.append("atr")
+    if r.atr and r.atr < SPREAD * 3:                 s -= 20; why.append("tight")
+
+    # E. Volume (10)
+    if r.volume > 1.2 * r.vma:                       s += 10; why.append("vol")
+
+    return s, why
+
+
+def pick_signals(df, s, n, max_age_min=15):
+    """Best n (score, side, index, candle_key, why) from unused, fresh candles."""
+    used = set(s.get("used", []))
+    now = datetime.now(timezone.utc)
+    best = {}
+    for i in range(max(56, len(df) - 6), len(df)):          # last ~30 min of 5m bars
+        ts = pd.Timestamp(df.datetime.iloc[i])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        if (now - ts.to_pydatetime()).total_seconds() > max_age_min * 60:
+            continue                                        # too stale to act on
+        key = ts.isoformat()
+        if key in used:
+            continue
+        bs, bside, bwhy = 0.0, None, []
+        for side in ("BUY", "SELL"):
+            sc, why = score_at(df, i, side)
+            if sc > bs:
+                bs, bside, bwhy = sc, side, why
+        if bside and bs > 0:
+            best[i] = (bs, bside, i, key, bwhy)
+    return sorted(best.values(), key=lambda x: -x[0])[:n]
+
+
+# ---------------- trade construction ----------------
+
+def make_trade(df, session, number, side, trigger_close, score):
+    entry = live_price(trigger_close)
+    sign = 1 if side == "BUY" else -1
+    risk = max(round(atr(df) * 1.0, 2), 1.5)          # stop about one 5-minute ATR, never tighter than $1.50
+    # A+ setups get 1:3, everything else 1:2 — let winners run when the score is high
+    ratio = 3.0 if score >= 55 else random.choice(RATIOS)
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
     started = now_naive - timedelta(minutes=now_naive.minute % 5)   # start of the 5-minute candle we are in
-    risk = max(round(atr(df) * 1.0, 2), 1.5)           # stop about one 5-minute ATR, never tighter than $1.50
-    ratio = random.choice(RATIOS)
-    side = random.choice(["BUY", "SELL"])
-    sign = 1 if side == "BUY" else -1
     return {"n": number, "session": session, "side": side, "entry": round(entry, 2),
             "sl": round(entry - sign * risk, 2), "tp": round(entry + sign * risk * ratio, 2),
-            "ratio": ratio, "risk": risk, "opened_at": datetime.now(timezone.utc).isoformat(),
+            "ratio": ratio, "risk": risk, "score": round(score),
+            "opened_at": datetime.now(timezone.utc).isoformat(),
             "candle": started.isoformat()}
 
 
@@ -163,8 +251,12 @@ def caption(tr):
 def resolve(s, df, force_close=False):
     now = datetime.now(timezone.utc)
     done = []
+    dfdt = pd.to_datetime(df["datetime"], utc=True)
     for tr in list(s["open"]):
-        after = df[df["datetime"] > pd.Timestamp(tr["candle"])]
+        candle_ts = pd.Timestamp(tr["candle"])
+        if candle_ts.tzinfo is None:
+            candle_ts = candle_ts.tz_localize("UTC")
+        after = df[dfdt > candle_ts]
         res = None
         for hi, lo in zip(after["high"].values, after["low"].values):
             buy = tr["side"] == "BUY"
@@ -215,6 +307,7 @@ def main():
     day = now.strftime("%Y-%m-%d")
     if s["day"] != day:
         s["day"], s["count"] = day, {}
+        s["used"] = []
     df = fetch()
     for t in s["open"]:
         t.setdefault("day", t["opened_at"][:10])
@@ -247,18 +340,26 @@ def main():
         mins_in = now.hour * 60 + now.minute - a
         should = int(PER_SESSION * min(1.0, (mins_in + 30) / (c - a - 30)))   # spread evenly, finished 30 min before the session ends
         todo = max(0, min(should - have, MAX_PER_RUN, PER_SESSION - have))
-        for k in range(todo):
-            if k:
-                time.sleep(random.randint(GAP_MIN, GAP_MAX))
-                df = fetch(); resolve_msg = results_text(resolve(s, df))
-                if resolve_msg:
-                    b.send(resolve_msg)
-            n = sum(s["count"].values()) + 1
-            tr = make_trade(df, session, n)
-            tr["day"] = day
-            b.send_image_or_text(lambda: make_scalp_image(tr), caption(tr), caption=caption(tr))
-            s["open"].append(tr); s["count"][session] = n
-            save(s)
+        if todo > 0:
+            df = add_indicators(df)
+            picks = pick_signals(df, s, todo)
+            if not picks:
+                print(f"{session}: no fresh scored candles, slot skipped")
+            for k, (sc, side, i, key, why) in enumerate(picks):
+                if k:
+                    time.sleep(random.randint(GAP_MIN, GAP_MAX))
+                    df = add_indicators(fetch())
+                    resolve_msg = results_text(resolve(s, df))
+                    if resolve_msg:
+                        b.send(resolve_msg)
+                n = sum(s["count"].values()) + 1
+                tr = make_trade(df, session, n, side, float(df.close.iloc[i]), sc)
+                tr["day"] = day
+                b.send_image_or_text(lambda: make_scalp_image(tr), caption(tr), caption=caption(tr))
+                s["open"].append(tr)
+                s["count"][session] = s["count"].get(session, 0) + 1
+                s.setdefault("used", []).append(key)
+                save(s)
     save(s)
     print("Scalp run done:", s["count"], "open:", len(s["open"]))
 
