@@ -82,14 +82,22 @@ def _rsi(s, n=7):
 
 def add_indicators(df):
     df = df.copy()
-    c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    c, h, l = df["close"], df["high"], df["low"]
+    # spot forex (XAU/USD) has no real volume — use candle range as a proxy
+    if "volume" in df.columns and df["volume"].notna().any() and df["volume"].sum() > 0:
+        v = df["volume"].astype(float)
+    else:
+        v = (h - l).abs().replace(0, 1e-9)
+
     df["ema9"]  = c.ewm(span=9,  adjust=False).mean()
     df["ema21"] = c.ewm(span=21, adjust=False).mean()
     df["ema50"] = c.ewm(span=50, adjust=False).mean()
     df["rsi7"]  = _rsi(c, 7)
+
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
     df["atr"]     = tr.ewm(alpha=1 / 14, adjust=False).mean()
     df["atr_med"] = df["atr"].rolling(200, min_periods=30).median()
+
     tp = (h + l + c) / 3
     df["vwap"] = (tp * v).rolling(78, min_periods=20).sum() / v.rolling(78, min_periods=20).sum().replace(0, 1e-9)
     df["vma"]  = v.rolling(20, min_periods=5).mean()
@@ -133,14 +141,14 @@ def score_at(df, i, side):
         s += 10
         why.append("vwap")
 
-    if r.atr > r.atr_med:
+    if pd.notna(r.atr) and pd.notna(r.atr_med) and r.atr > r.atr_med:
         s += 15
         why.append("atr")
-    if r.atr and r.atr < SPREAD * 3:
+    if pd.notna(r.atr) and r.atr and r.atr < SPREAD * 3:
         s -= 20
         why.append("tight")
 
-    if r.volume > 1.2 * r.vma:
+    if pd.notna(r.vma) and pd.notna(prev.vma) and r.vma > 1.2 * prev.vma:
         s += 10
         why.append("vol")
 
