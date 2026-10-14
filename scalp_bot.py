@@ -1,4 +1,4 @@
-"""Fast-scalp signal generator for gold (XAU/USD). Ranked setups (not random), 1:2 or 1:3 targets, about 100,120 a day,
+"""Fast-scalp signal generator for gold (XAU/USD). Ranked setups (not random), 1:2 or 1:3 targets, about 60 a day,
 split into morning / afternoon / evening sessions. Posts to your channel (TELEGRAM_CHAT_ID), or to a separate chat if you add a SCALP_CHAT_ID secret.
 Run every 30 minutes on weekdays: python scalp_bot.py"""
 import json, os, random, sys, time
@@ -10,7 +10,7 @@ import signal_bot as b
 
 SYMBOL = "XAU/USD"
 STATE = Path("state/scalp.json")
-PER_SESSION = 40
+PER_SESSION = 20
 SESSIONS = {"MORNING":   (6 * 60, 10 * 60 + 30),
             "AFTERNOON": (11 * 60, 15 * 60 + 30),
             "EVENING":   (16 * 60, 21 * 60)}
