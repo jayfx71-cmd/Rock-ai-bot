@@ -15,7 +15,7 @@ SESSIONS = {"MORNING":   (6 * 60, 10 * 60 + 30),
             "AFTERNOON": (11 * 60, 15 * 60 + 30),
             "EVENING":   (16 * 60, 21 * 60)}
 RATIOS = [2.0, 3.0]
-MAX_PER_RUN = 4
+MAX_PER_RUN = 6
 GAP_MIN, GAP_MAX = 20, 40      # seconds between signals in one run (short, so no signal goes stale while waiting)
 EXPIRE_MIN = 90
 SHOW_SESSION_SUMMARY = False
@@ -187,11 +187,11 @@ def score_at(df, i, side):
     return s, why
 
 
-def pick_signals(df, s, n, max_age_min=15):
-    used = set(s.get("used", []))
+def pick_signals(df, s, n, max_age_min=15, lookback=6, skip=frozenset()):
+    used = set(s.get("used", [])) | set(skip)
     now = datetime.now(timezone.utc)
     best = {}
-    for i in range(max(56, len(df) - 6), len(df)):
+    for i in range(max(56, len(df) - lookback), len(df)):
         ts = pd.Timestamp(df.datetime.iloc[i])
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
@@ -448,12 +448,19 @@ def main():
         todo = max(0, min(should - have, MAX_PER_RUN, PER_SESSION - have))
         if todo > 0:
             df = add_indicators(df)
-            picks = pick_signals(df, s, todo)
+            # Fill the quota: first the freshest setups (last 30 min, best score first), then, if we are still
+            # short, older ones (up to 2 hours). A setup whose price has already run away is skipped, and the next one is tried.
+            tier1 = pick_signals(df, s, 60, 30, 12)
+            tier2 = pick_signals(df, s, 60, 120, 24, skip={p[3] for p in tier1})
+            picks = tier1 + tier2
             trig = {k: float(df.close.iloc[i]) for (_, _, i, k, _) in picks}   # setup prices, taken before any refetch
             if not picks:
-                print(f"{session}: no fresh scored candles, slot skipped")
-            for k, (sc, side, i, key, why) in enumerate(picks):
-                if k:
+                print(f"{session}: no scored candles at all, nothing to post")
+            posted = 0
+            for (sc, side, i, key, why) in picks:
+                if posted >= todo:
+                    break
+                if posted:
                     time.sleep(random.randint(GAP_MIN, GAP_MAX))
                     df = add_indicators(fetch())
                     resolve_msg = results_text(resolve(s, df))
@@ -469,7 +476,9 @@ def main():
                 s["open"].append(tr)
                 s["count"][session] = s["count"].get(session, 0) + 1
                 s.setdefault("used", []).append(key)
+                posted += 1
                 save(s)
+            print(f"{session}: posted {posted} of {todo} wanted this run")
     save(s)
     print("Scalp run done:", s["count"], "open:", len(s["open"]))
 
