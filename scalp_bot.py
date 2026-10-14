@@ -370,11 +370,17 @@ def results_text(done):
         if t["result"] == "TP":
             lines.append(f"✅ #{t['n']} {t['side']} TP hit {t['r']:+.1f}R")
         elif t["result"] == "SL":
-            lines.append(f"❌ #{t['n']} {t['side']} SL hit {t['r']:+.1f}R")
+            print(f"(not posted) #{t['n']} {t['side']} SL hit {t['r']:+.1f}R")   # still recorded in the log, just not sent to Telegram
+            continue
         elif t["result"] == "BE":
             lines.append(f"🛡 #{t['n']} {t['side']} hit BE · partial win, trade protected (0R)")
         else:
+            if t["r"] < 0:
+                print(f"(not posted) #{t['n']} {t['side']} closed {t['r']:+.1f}R")
+                continue
             lines.append(f"⏱ #{t['n']} {t['side']} closed {t['r']:+.1f}R")
+    if not lines:
+        return None
     return "📋 <b>Results</b>\n" + "\n".join(lines)
 
 
