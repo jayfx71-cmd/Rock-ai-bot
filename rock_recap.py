@@ -5,7 +5,7 @@ import rock_card as rc
 from rock_card import font, glow, spaced, spaced_width, vgrad, rrect_mask, rgba, hue_shift, WHITE, GREY, W, H, A
 
 
-def render_recap(day_label, wins, path="recap.png"):
+def render_recap(day_label, wins, path="recap.png", be_count=0):
     th = rc.THEMES["BUY"]
     main, light, dark = th["main"], th["light"], th["dark"]
     img = Image.new("RGBA", (W, H), (5, 6, 9, 255))
@@ -49,6 +49,8 @@ def render_recap(day_label, wins, path="recap.png"):
     d.ellipse((322, 515, 330, 523), fill=rgba(GREY))
     spaced(d, (362, 518), "GOLD SCALPS", font("Medium", 25), (214, 218, 226), 1.5)
 
+    if be_count:
+        d.text((128, 556), f"+ {be_count} trade{'s' if be_count != 1 else ''} protected at break-even (partial wins)", font=font("Medium", 21), fill=GREY, anchor="lm")
     # list of winners (up to 12, two columns)
     shown = wins[:12]
     ly0 = 590
