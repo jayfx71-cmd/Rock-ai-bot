@@ -21,6 +21,7 @@ EXPIRE_MIN = 90
 SHOW_SESSION_SUMMARY = False
 RECAP_AFTER_MIN = 21 * 60 + 10
 SPREAD = 0.30
+BE_TRIGGER_R = 0.5   # send 'Set BE' when price is this far in profit, as a share of the stop distance (0.5 = half way to a 1R win)
 SESSION_TEXT = {   # opening and closing messages (times are Nigeria time)
     "MORNING": (
         "☀️🌅 <b>Good morning traders!</b>\n"
@@ -305,6 +306,8 @@ def caption(tr):
 
 
 def resolve(s, df, force_close=False):
+    """Follow every open trade candle by candle. Once price moves BE_TRIGGER_R x the risk our way we send a
+    'Set BE' alert; if price then comes back to the entry the trade closes as BE (0R, protected, a partial win)."""
     now = datetime.now(timezone.utc)
     done = []
     dfdt = pd.to_datetime(df["datetime"], utc=True)
@@ -313,22 +316,43 @@ def resolve(s, df, force_close=False):
         if candle_ts.tzinfo is None:
             candle_ts = candle_ts.tz_localize("UTC")
         after = df[dfdt > candle_ts]
-        res = None
+        buy = tr["side"] == "BUY"
+        sign = 1 if buy else -1
+        trigger = tr["entry"] + sign * BE_TRIGGER_R * tr["risk"]
+        res, be_on = None, False
         for hi, lo in zip(after["high"].values, after["low"].values):
-            buy = tr["side"] == "BUY"
-            if (lo <= tr["sl"]) if buy else (hi >= tr["sl"]):
-                res = "SL"
-                break
-            if (hi >= tr["tp"]) if buy else (lo <= tr["tp"]):
-                res = "TP"
-                break
+            if not be_on:
+                if (lo <= tr["sl"]) if buy else (hi >= tr["sl"]):
+                    res = "SL"
+                    break
+                if (hi >= tr["tp"]) if buy else (lo <= tr["tp"]):
+                    res = "TP"
+                    break
+                if (hi >= trigger) if buy else (lo <= trigger):
+                    be_on = True
+                    if (lo <= tr["entry"]) if buy else (hi >= tr["entry"]):   # same candle came back: assume the worst
+                        res = "BE"
+                        break
+            else:
+                if (lo <= tr["entry"]) if buy else (hi >= tr["entry"]):
+                    res = "BE"
+                    break
+                if (hi >= tr["tp"]) if buy else (lo <= tr["tp"]):
+                    res = "TP"
+                    break
+        if be_on and res is None and not tr.get("be_notified"):
+            tr["be_notified"] = True
+            b.send(f"🛡 <b>Set BE now</b> · {tr['side']} XAU/USD\n"
+                   f"Price has moved in your favour. Move your stop loss to your entry:\n"
+                   f"<code>{tr['entry']:.2f}</code>\n\n"
+                   f"👆 <i>Tap on the price number to copy</i>")
         if res is None and (force_close or (now - datetime.fromisoformat(tr["opened_at"])).total_seconds() > EXPIRE_MIN * 60):
             last = float(df["close"].iloc[-1])
-            sign = 1 if tr["side"] == "BUY" else -1
-            r = max(min(sign * (last - tr["entry"]) / tr["risk"], tr["ratio"]), -1.0)
+            floor = 0.0 if (be_on or tr.get("be_notified")) else -1.0     # a protected trade cannot finish below 0
+            r = max(min(sign * (last - tr["entry"]) / tr["risk"], tr["ratio"]), floor)
             tr["result"], tr["r"] = "TIMEOUT", round(r, 2)
         elif res:
-            tr["result"], tr["r"] = res, (tr["ratio"] if res == "TP" else -1.0)
+            tr["result"], tr["r"] = res, {"TP": tr["ratio"], "SL": -1.0, "BE": 0.0}[res]
         else:
             continue
         tr["closed_at"] = now.isoformat()
@@ -341,8 +365,16 @@ def resolve(s, df, force_close=False):
 def results_text(done):
     if not done:
         return None
-    lines = [f"{'✅' if t['result'] == 'TP' else ('❌' if t['result'] == 'SL' else '⏱')} #{t['n']} {t['side']} "
-             f"{'TP hit' if t['result'] == 'TP' else ('SL hit' if t['result'] == 'SL' else 'closed')} {t['r']:+.1f}R" for t in done]
+    lines = []
+    for t in done:
+        if t["result"] == "TP":
+            lines.append(f"✅ #{t['n']} {t['side']} TP hit {t['r']:+.1f}R")
+        elif t["result"] == "SL":
+            lines.append(f"❌ #{t['n']} {t['side']} SL hit {t['r']:+.1f}R")
+        elif t["result"] == "BE":
+            lines.append(f"🛡 #{t['n']} {t['side']} hit BE · partial win, trade protected (0R)")
+        else:
+            lines.append(f"⏱ #{t['n']} {t['side']} closed {t['r']:+.1f}R")
     return "📋 <b>Results</b>\n" + "\n".join(lines)
 
 
@@ -382,11 +414,12 @@ def main():
         b.send(txt)
     if force and s["count"] and day not in s.setdefault("recap_days", []):
         wins = [t for t in s["closed"] if t.get("day") == day and t["r"] > 0]
+        be_n = sum(1 for t in s["closed"] if t.get("day") == day and t["result"] == "BE")
         label = (now + timedelta(hours=1)).strftime("%a %d %b")
         cap = f"\U0001F3C6 <b>ROCK AI DAY RECAP</b> \u00b7 {label}\n{len(wins)} winning trades today"
         try:
             import rock_recap
-            b.send_photo(rock_recap.render_recap(label, wins), cap)
+            b.send_photo(rock_recap.render_recap(label, wins, be_count=be_n), cap)
         except Exception as e:
             print(f"Recap card failed, sending text: {str(e)[:150]}")
             b.send(cap)
