@@ -1,62 +1,41 @@
-name: scalp
+name: Scalp signals
 
 on:
   schedule:
-    - cron: '7,37 6-21 * * 1-5'
-  workflow_dispatch:
+    - cron: '15 6-21 * * 1-5'       # backup only: once an hour (the main timer is cron-job.org, see guide)
+  workflow_dispatch:                # lets you press "Run workflow" by hand
 
-concurrency:
-  group: scalp
-  cancel-in-progress: false
+concurrency: scalp                  # never two runs at the same time
 
 jobs:
   scalp:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: '3.12'
+          cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Debug secrets present
-        run: |
-          if [ -z "$TD_KEY" ]; then echo "TD_KEY is EMPTY"; else echo "TD_KEY length: ${#TD_KEY}"; fi
-          if [ -z "$TWELVEDATA_API_KEY" ]; then echo "TWELVEDATA_API_KEY is EMPTY"; else echo "TWELVEDATA_API_KEY length: ${#TWELVEDATA_API_KEY}"; fi
-          if [ -z "$TELEGRAM_CHAT_ID" ]; then echo "TELEGRAM_CHAT_ID is EMPTY"; else echo "TELEGRAM_CHAT_ID set"; fi
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "TELEGRAM_BOT_TOKEN is EMPTY"; else echo "TELEGRAM_BOT_TOKEN set"; fi
-        env:
-          TD_KEY: ${{ secrets.TD_KEY }}
-          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-      - name: Restore state
+      - name: Restore the bot's memory (open trades, counters)
         uses: actions/cache/restore@v4
         with:
           path: state
           key: scalp-state-${{ github.run_id }}
-          restore-keys: |
-            scalp-state-
+          restore-keys: scalp-state-
 
-      - name: Run scalps
+      - name: Run the bot
         env:
-          TD_KEY: ${{ secrets.TD_KEY }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SCALP_CHAT_ID: ${{ secrets.SCALP_CHAT_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scalp_bot.py
 
-      - name: Save state
+      - name: Save the bot's memory
         if: always()
         uses: actions/cache/save@v4
         with:
