@@ -388,7 +388,25 @@ def session_summary(s, name, day):
             f"Total: {sum(t['r'] for t in ts):+.1f}R")
 
 
+def _tg_send(text):
+    r = b.requests.post(f"https://api.telegram.org/bot{b.TG_TOKEN}/sendMessage",
+                        json={"chat_id": b.TG_CHAT, "text": text, "parse_mode": "HTML"}, timeout=30)
+    if not r.ok:
+        print(f"TELEGRAM ERROR (message): {r.status_code} {r.text[:300]}")   # says exactly what is wrong, e.g. 'chat not found'
+    r.raise_for_status()
+
+
+def _tg_photo(path, caption=""):
+    with open(path, "rb") as f:
+        r = b.requests.post(f"https://api.telegram.org/bot{b.TG_TOKEN}/sendPhoto",
+                            data={"chat_id": b.TG_CHAT, "caption": caption, "parse_mode": "HTML"}, files={"photo": f}, timeout=60)
+    if not r.ok:
+        print(f"TELEGRAM ERROR (photo): {r.status_code} {r.text[:300]}")
+    r.raise_for_status()
+
+
 def main():
+    b.send, b.send_photo = _tg_send, _tg_photo
     chat = os.environ.get("SCALP_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID", "")
     if not chat:
         print("No chat id found. Check the TELEGRAM_CHAT_ID secret.")
