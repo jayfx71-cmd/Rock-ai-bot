@@ -362,6 +362,25 @@ def resolve(s, df, force_close=False):
     return done
 
 
+DEDUPE_MIN = 20      # look back this many minutes for a similar signal
+DEDUPE_R = 0.7       # a same-direction signal must be at least this many "risks" (about $1+) away from the earlier one
+
+
+def too_close(s, tr):
+    """True if a same-direction signal was sent recently at nearly the same price (no near-duplicate signals)."""
+    now = datetime.now(timezone.utc)
+    for t in s["open"] + s["closed"][-40:]:
+        if t["side"] != tr["side"]:
+            continue
+        try:
+            age = (now - datetime.fromisoformat(t["opened_at"])).total_seconds() / 60
+        except Exception:
+            continue
+        if age <= DEDUPE_MIN and abs(t["entry"] - tr["entry"]) < DEDUPE_R * tr["risk"]:
+            return True
+    return False
+
+
 def results_text(done):
     if not done:
         return None
@@ -493,6 +512,10 @@ def main():
                 n = sum(s["count"].values()) + 1
                 tr = make_trade(df, session, n, side, trig[key], sc)
                 if tr is None:
+                    s.setdefault("used", []).append(key)
+                    continue
+                if too_close(s, tr):
+                    print(f"skipped #{n} {side}: too close to a signal already sent")
                     s.setdefault("used", []).append(key)
                     continue
                 tr["day"] = day
