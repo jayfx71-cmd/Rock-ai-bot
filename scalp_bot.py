@@ -10,7 +10,7 @@ import signal_bot as b
 
 SYMBOL = "XAU/USD"
 STATE = Path("state/scalp.json")
-PER_SESSION = 20
+PER_SESSION = 40
 SESSIONS = {"MORNING":   (6 * 60, 10 * 60 + 30),
             "AFTERNOON": (11 * 60, 15 * 60 + 30),
             "EVENING":   (16 * 60, 21 * 60)}
