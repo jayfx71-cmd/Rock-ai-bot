@@ -18,6 +18,7 @@ RATIOS = [2.0, 3.0]
 MAX_PER_RUN = 6
 GAP_MIN, GAP_MAX = 20, 40      # seconds between signals in one run (short, so no signal goes stale while waiting)
 EXPIRE_MIN = 90
+RANDOM_MODE = True   # True = random BUY/SELL at the live price so the session always gets its signals. False = ranked setups
 SHOW_SESSION_SUMMARY = False
 RECAP_AFTER_MIN = 21 * 60 + 10
 SPREAD = 0.30
@@ -214,7 +215,7 @@ def make_trade(df, session, number, side, trigger_close, score):
     entry = live_price(trigger_close)
     sign = 1 if side == "BUY" else -1
     risk = max(round(atr(df) * 1.0, 2), 1.5)
-    if abs(entry - trigger_close) > 0.5 * risk:    # price already ran away from the setup: do not post it
+    if not RANDOM_MODE and abs(entry - trigger_close) > 0.5 * risk:    # price already ran away from the setup: do not post it
         print(f"Skipped {side}: price moved {abs(entry - trigger_close):.2f} since the setup")
         return None
     ratio = 3.0 if score >= 55 else random.choice(RATIOS)
@@ -381,6 +382,18 @@ def too_close(s, tr):
     return False
 
 
+def random_side(s):
+    """Random BUY/SELL, but if the last signal went out less than 10 minutes ago, take the other direction (no twin signals)."""
+    side = random.choice(("BUY", "SELL"))
+    last = (s["open"] + s["closed"][-5:])
+    last = max(last, key=lambda t: t["opened_at"], default=None)
+    if last:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(last["opened_at"])).total_seconds() / 60
+        if age < 10:
+            side = "SELL" if last["side"] == "BUY" else "BUY"
+    return side
+
+
 def results_text(done):
     if not done:
         return None
@@ -496,6 +509,8 @@ def main():
             tier1 = pick_signals(df, s, 60, 30, 12)
             tier2 = pick_signals(df, s, 60, 120, 24, skip={p[3] for p in tier1})
             picks = tier1 + tier2
+            if RANDOM_MODE:
+                picks = [(0.0, random.choice(("BUY", "SELL")), len(df) - 1, f"rnd{time.time():.0f}-{k}", ["random"]) for k in range(todo)]
             trig = {k: float(df.close.iloc[i]) for (_, _, i, k, _) in picks}   # setup prices, taken before any refetch
             if not picks:
                 print(f"{session}: no scored candles at all, nothing to post")
@@ -510,11 +525,13 @@ def main():
                     if resolve_msg:
                         b.send(resolve_msg)
                 n = sum(s["count"].values()) + 1
+                if RANDOM_MODE:
+                    side = random_side(s)
                 tr = make_trade(df, session, n, side, trig[key], sc)
                 if tr is None:
                     s.setdefault("used", []).append(key)
                     continue
-                if too_close(s, tr):
+                if not RANDOM_MODE and too_close(s, tr):
                     print(f"skipped #{n} {side}: too close to a signal already sent")
                     s.setdefault("used", []).append(key)
                     continue
