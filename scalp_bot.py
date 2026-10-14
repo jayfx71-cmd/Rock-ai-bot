@@ -21,6 +21,14 @@ EXPIRE_MIN = 90
 SHOW_SESSION_SUMMARY = False
 RECAP_AFTER_MIN = 21 * 60 + 10
 SPREAD = 0.30
+SESSION_TEXT = {   # opening and closing messages (times are Nigeria time)
+    "MORNING": ("\u2600\ufe0f <b>Good morning!</b>\nThe <b>ROCK AI Morning Session</b> is now open.\n\U0001F552 07:00 \u2013 11:30\nGold (XAU/USD) scalps, 1:2 or 1:3. Stay sharp and trade your plan.",
+                "\U0001F305 <b>Morning session closed.</b>\nThanks for trading with us. Take a 30-minute break.\nThe <b>Afternoon Session</b> opens at 12:00."),
+    "AFTERNOON": ("\U0001F324 <b>Good afternoon!</b>\nThe <b>ROCK AI Afternoon Session</b> is now open.\n\U0001F552 12:00 \u2013 16:30\nGold (XAU/USD) scalps, 1:2 or 1:3. Stay disciplined.",
+                  "\U0001F307 <b>Afternoon session closed.</b>\nTake a 30-minute break.\nThe <b>Evening Session</b> opens at 17:00."),
+    "EVENING": ("\U0001F319 <b>Good evening!</b>\nThe <b>ROCK AI Evening Session</b> is now open.\n\U0001F552 17:00 \u2013 22:00\nGold (XAU/USD) scalps, 1:2 or 1:3. Last session of the day.",
+                "\U0001F303 <b>Evening session closed.</b>\nThat is it for today. The day recap is coming next.\nSee you tomorrow at 07:00. Rest well."),
+}
 
 
 def load():
@@ -359,6 +367,15 @@ def main():
             b.send(cap)
         s["recap_days"].append(day)
     session, a, c = session_of(now)
+    greeted = s.setdefault("greeted", [])
+    if session and f"{day}:{session}:open" not in greeted:        # opening message, once per session
+        b.send(SESSION_TEXT[session][0])
+        greeted.append(f"{day}:{session}:open")
+    for name, (sa, sc) in SESSIONS.items():                       # closing message, once, only for sessions we opened
+        if now.hour * 60 + now.minute >= sc and f"{day}:{name}:open" in greeted and f"{day}:{name}:close" not in greeted:
+            b.send(SESSION_TEXT[name][1])
+            greeted.append(f"{day}:{name}:close")
+    s["greeted"] = greeted[-30:]
     for name, (sa, sc) in SESSIONS.items():
         key = f"{day}:{name}"
         if SHOW_SESSION_SUMMARY and now.hour * 60 + now.minute >= sc and key not in s["summary_sent"] and s["count"].get(name):
