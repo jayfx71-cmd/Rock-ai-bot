@@ -22,12 +22,36 @@ SHOW_SESSION_SUMMARY = False
 RECAP_AFTER_MIN = 21 * 60 + 10
 SPREAD = 0.30
 SESSION_TEXT = {   # opening and closing messages (times are Nigeria time)
-    "MORNING": ("\u2600\ufe0f <b>Good morning!</b>\nThe <b>ROCK AI Morning Session</b> is now open.\n\U0001F552 07:00 \u2013 11:30\nGold (XAU/USD) scalps, 1:2 or 1:3. Stay sharp and trade your plan.",
-                "\U0001F305 <b>Morning session closed.</b>\nThanks for trading with us. Take a 30-minute break.\nThe <b>Afternoon Session</b> opens at 12:00."),
-    "AFTERNOON": ("\U0001F324 <b>Good afternoon!</b>\nThe <b>ROCK AI Afternoon Session</b> is now open.\n\U0001F552 12:00 \u2013 16:30\nGold (XAU/USD) scalps, 1:2 or 1:3. Stay disciplined.",
-                  "\U0001F307 <b>Afternoon session closed.</b>\nTake a 30-minute break.\nThe <b>Evening Session</b> opens at 17:00."),
-    "EVENING": ("\U0001F319 <b>Good evening!</b>\nThe <b>ROCK AI Evening Session</b> is now open.\n\U0001F552 17:00 \u2013 22:00\nGold (XAU/USD) scalps, 1:2 or 1:3. Last session of the day.",
-                "\U0001F303 <b>Evening session closed.</b>\nThat is it for today. The day recap is coming next.\nSee you tomorrow at 07:00. Rest well."),
+    "MORNING": (
+        "☀️🌅 <b>Good morning traders!</b>\n"
+        "Rise and shine, it's another day to go after the money again 💰\n\n"
+        "🔥 <b>ROCK AI · MORNING SESSION is LIVE</b>\n"
+        "🕖 07:00 – 11:30 (Nigeria time)\n"
+        "📊 Gold (XAU/USD) scalps · 1:2 and 1:3\n\n"
+        "Charts open? Coffee ready? 😎 Let's get it. Ready? 🚀",
+        "☕ <b>Morning session done!</b>\n"
+        "Let's take a 30-minute break 😮‍💨 Stretch, drink some water, reset your mind.\n\n"
+        "🔔 Signals will resume shortly. The <b>Afternoon Session</b> opens at 12:00. Stay ready! 🔥"),
+    "AFTERNOON": (
+        "🌤💪 <b>Good afternoon traders!</b>\n"
+        "Break's over and we're back for round two 💰\n\n"
+        "🔥 <b>ROCK AI · AFTERNOON SESSION is LIVE</b>\n"
+        "🕛 12:00 – 16:30 (Nigeria time)\n"
+        "📊 Gold (XAU/USD) scalps · 1:2 and 1:3\n\n"
+        "Eyes on the charts, stay disciplined. Ready? 🚀",
+        "🌇 <b>Afternoon session done!</b>\n"
+        "Time for another 30-minute break 😮‍💨 Breathe, hydrate, reset.\n\n"
+        "🔔 Signals will resume shortly. The <b>Evening Session</b> opens at 17:00. Stay ready! 🔥"),
+    "EVENING": (
+        "🌙✨ <b>Good evening traders!</b>\n"
+        "Final round of the day, let's finish strong 💰\n\n"
+        "🔥 <b>ROCK AI · EVENING SESSION is LIVE</b>\n"
+        "🕔 17:00 – 22:00 (Nigeria time)\n"
+        "📊 Gold (XAU/USD) scalps · 1:2 and 1:3\n\n"
+        "Last session of the day. Stay sharp! 🚀",
+        "🌃 <b>That's a wrap, traders!</b> 🏁\n"
+        "The evening session is closed. Day recap coming up next 📊\n\n"
+        "Rest well, recharge, and we go again tomorrow at 07:00 ☀️🔥"),
 }
 
 
@@ -276,7 +300,8 @@ def caption(tr):
     return (f"{'🟢' if tr['side'] == 'BUY' else '🔴'} <b>{tr['side']} XAU/USD</b>\n"
             f"<b>Entry</b> <code>{tr['entry']:.2f}</code>\n"
             f"<b>SL</b> <code>{tr['sl']:.2f}</code>\n"
-            f"<b>TP</b> <code>{tr['tp']:.2f}</code>  (1:{tr['ratio']:g})")
+            f"<b>TP</b> <code>{tr['tp']:.2f}</code>  (1:{tr['ratio']:g})\n\n"
+            f"👆 <i>Tap on any price number to copy</i>")
 
 
 def resolve(s, df, force_close=False):
