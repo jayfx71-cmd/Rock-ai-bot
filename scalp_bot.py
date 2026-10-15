@@ -10,14 +10,14 @@ import signal_bot as b
 
 SYMBOL = "XAU/USD"
 STATE = Path("state/scalp.json")
-PER_SESSION = 42   # upper limit per session (one signal every 7 minutes gives about 38-42)
+PER_SESSION = 26   # upper limit per session (one signal every 12 minutes gives about 22-25)
 SESSIONS = {"MORNING":   (6 * 60, 10 * 60 + 30),
             "AFTERNOON": (11 * 60, 15 * 60 + 30),
             "EVENING":   (16 * 60, 21 * 60)}
 RATIOS = [2.0, 3.0]
 MAX_PER_RUN = 1    # most signals one run posts (1 = a skipped run is NOT made up with extra signals)
 MAX_WAIT_SEC = 330  # a run waits at most this long for its slot (the timer wakes the bot every 5 minutes)
-CADENCE_MIN = 7    # a new signal every this many minutes (None = old pacing)
+CADENCE_MIN = 12   # a new signal every this many minutes (None = old pacing)
 GAP_MIN, GAP_MAX = 20, 40      # seconds between signals in one run (short, so no signal goes stale while waiting)
 EXPIRE_MIN = 90
 RANDOM_MODE = True   # True = random BUY/SELL at the live price so the session always gets its signals. False = ranked setups
@@ -250,7 +250,7 @@ def make_scalp_image_basic(tr, path="scalp.png"):
     box(0.25, 0.25, W - 0.5, H - 0.5, PANEL, EDGE, 1.2, 0.2, 1)
     ax.text(0.55, H - 0.7, "ROCK AI", color=FG, fontsize=17, fontweight="bold", va="center", family=sans, zorder=5)
     ax.plot([0.55, 0.85, 1.0, 1.25], [H - 0.98, H - 0.98, H - 0.9, H - 0.86], color=FG, lw=1.6, zorder=5)
-    ax.text(W - 0.55, H - 0.7, f"#{tr['n']:02d} / 126", color=DIM, fontsize=10, fontweight="bold", ha="right", va="center", family=mono, zorder=5)
+    ax.text(W - 0.55, H - 0.7, f"#{tr['n']:02d} / 78", color=DIM, fontsize=10, fontweight="bold", ha="right", va="center", family=mono, zorder=5)
     ax.text(W - 0.55, H - 1.0, f"{tr['session']} SESSION", color=DIM, fontsize=7.5, ha="right", va="center", family=mono, zorder=5)
     ax.plot([0.5, W - 0.5], [H - 1.25, H - 1.25], color=EDGE, lw=1, zorder=3)
 
