@@ -10,16 +10,17 @@ import signal_bot as b
 
 SYMBOL = "XAU/USD"
 STATE = Path("state/scalp.json")
-PER_SESSION = 26   # upper limit per session (one signal every 12 minutes gives about 22-25)
+PER_SESSION = 20   # upper limit per session (one signal every 15 minutes gives about 18-20)
 SESSIONS = {"MORNING":   (6 * 60, 10 * 60 + 30),
             "AFTERNOON": (11 * 60, 15 * 60 + 30),
             "EVENING":   (16 * 60, 21 * 60)}
 RATIOS = [2.0, 3.0]
 MAX_PER_RUN = 1    # most signals one run posts (1 = a skipped run is NOT made up with extra signals)
 MAX_WAIT_SEC = 330  # a run waits at most this long for its slot (the timer wakes the bot every 5 minutes)
-CADENCE_MIN = 12   # a new signal every this many minutes (None = old pacing)
+CADENCE_MIN = 15   # a new signal every this many minutes (None = old pacing)
 GAP_MIN, GAP_MAX = 20, 40      # seconds between signals in one run (short, so no signal goes stale while waiting)
 EXPIRE_MIN = 90
+PRE_SIGNAL = True    # before every new signal: tell you to close trades that are still open (or a short heads-up)
 RANDOM_MODE = True   # True = random BUY/SELL at the live price so the session always gets its signals. False = ranked setups
 SHOW_SESSION_SUMMARY = False
 RECAP_AFTER_MIN = 21 * 60 + 10
@@ -250,7 +251,7 @@ def make_scalp_image_basic(tr, path="scalp.png"):
     box(0.25, 0.25, W - 0.5, H - 0.5, PANEL, EDGE, 1.2, 0.2, 1)
     ax.text(0.55, H - 0.7, "ROCK AI", color=FG, fontsize=17, fontweight="bold", va="center", family=sans, zorder=5)
     ax.plot([0.55, 0.85, 1.0, 1.25], [H - 0.98, H - 0.98, H - 0.9, H - 0.86], color=FG, lw=1.6, zorder=5)
-    ax.text(W - 0.55, H - 0.7, f"#{tr['n']:02d} / 78", color=DIM, fontsize=10, fontweight="bold", ha="right", va="center", family=mono, zorder=5)
+    ax.text(W - 0.55, H - 0.7, f"#{tr['n']:02d} / 60", color=DIM, fontsize=10, fontweight="bold", ha="right", va="center", family=mono, zorder=5)
     ax.text(W - 0.55, H - 1.0, f"{tr['session']} SESSION", color=DIM, fontsize=7.5, ha="right", va="center", family=mono, zorder=5)
     ax.plot([0.5, W - 0.5], [H - 1.25, H - 1.25], color=EDGE, lw=1, zorder=3)
 
@@ -382,6 +383,26 @@ def too_close(s, tr):
         if age <= DEDUPE_MIN and abs(t["entry"] - tr["entry"]) < DEDUPE_R * tr["risk"]:
             return True
     return False
+
+
+def pre_signal(s, df):
+    """Goes out right before every new signal. Any trade still open (no TP, SL or BE yet) is closed at the live price and
+    the message tells you to close it; if nothing is open, a short heads-up is sent instead."""
+    now = datetime.now(timezone.utc)
+    live = live_price(float(df["close"].iloc[-1]))
+    lines = []
+    for tr in list(s["open"]):
+        sign = 1 if tr["side"] == "BUY" else -1
+        floor = 0.0 if tr.get("be_notified") else -1.0
+        r = max(min(sign * (live - tr["entry"]) / tr["risk"], tr["ratio"]), floor)
+        tr["result"], tr["r"], tr["closed_at"] = "CLOSE", round(r, 2), now.isoformat()
+        s["open"].remove(tr)
+        s["closed"].append(tr)
+        lines.append(f"\U0001F514 <b>Close #{tr['n']} {tr['side']}</b> now")
+    if lines:
+        return ("\u23F0 <b>Close your open trade before the next signal</b>\n" + "\n".join(lines) +
+                f"\nMarket price: <code>{live:.2f}</code>\n\n\U0001F446 <i>Tap on the price number to copy</i>")
+    return "\u26A1 <b>New signal coming up...</b> get ready"
 
 
 def random_side(s):
@@ -541,6 +562,9 @@ def main():
                     resolve_msg = results_text(resolve(s, df))
                     if resolve_msg:
                         b.send(resolve_msg)
+                if PRE_SIGNAL:
+                    b.send(pre_signal(s, df))
+                    time.sleep(3)
                 n = sum(s["count"].values()) + 1
                 if RANDOM_MODE:
                     side = random_side(s)
