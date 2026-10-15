@@ -10,13 +10,14 @@ import signal_bot as b
 
 SYMBOL = "XAU/USD"
 STATE = Path("state/scalp.json")
-PER_SESSION = 27   # about one signal every 10 minutes in a 4.5 hour session
+PER_SESSION = 42   # upper limit per session (one signal every 7 minutes gives about 38-42)
 SESSIONS = {"MORNING":   (6 * 60, 10 * 60 + 30),
             "AFTERNOON": (11 * 60, 15 * 60 + 30),
             "EVENING":   (16 * 60, 21 * 60)}
 RATIOS = [2.0, 3.0]
 MAX_PER_RUN = 1    # most signals one run posts (1 = a skipped run is NOT made up with extra signals)
-CADENCE_MIN = 10   # a new signal every this many minutes. If a run was skipped, the next run posts the missed ones (up to MAX_PER_RUN). None = old pacing
+MAX_WAIT_SEC = 330  # a run waits at most this long for its slot (the timer wakes the bot every 5 minutes)
+CADENCE_MIN = 7    # a new signal every this many minutes (None = old pacing)
 GAP_MIN, GAP_MAX = 20, 40      # seconds between signals in one run (short, so no signal goes stale while waiting)
 EXPIRE_MIN = 90
 RANDOM_MODE = True   # True = random BUY/SELL at the live price so the session always gets its signals. False = ranked setups
@@ -249,7 +250,7 @@ def make_scalp_image_basic(tr, path="scalp.png"):
     box(0.25, 0.25, W - 0.5, H - 0.5, PANEL, EDGE, 1.2, 0.2, 1)
     ax.text(0.55, H - 0.7, "ROCK AI", color=FG, fontsize=17, fontweight="bold", va="center", family=sans, zorder=5)
     ax.plot([0.55, 0.85, 1.0, 1.25], [H - 0.98, H - 0.98, H - 0.9, H - 0.86], color=FG, lw=1.6, zorder=5)
-    ax.text(W - 0.55, H - 0.7, f"#{tr['n']:02d} / 81", color=DIM, fontsize=10, fontweight="bold", ha="right", va="center", family=mono, zorder=5)
+    ax.text(W - 0.55, H - 0.7, f"#{tr['n']:02d} / 126", color=DIM, fontsize=10, fontweight="bold", ha="right", va="center", family=mono, zorder=5)
     ax.text(W - 0.55, H - 1.0, f"{tr['session']} SESSION", color=DIM, fontsize=7.5, ha="right", va="center", family=mono, zorder=5)
     ax.plot([0.5, W - 0.5], [H - 1.25, H - 1.25], color=EDGE, lw=1, zorder=3)
 
@@ -384,13 +385,13 @@ def too_close(s, tr):
 
 
 def random_side(s):
-    """Random BUY/SELL, but if the last signal went out less than 10 minutes ago, take the other direction (no twin signals)."""
+    """Random BUY/SELL, but if the last signal went out less than 3 minutes ago, take the other direction (no twin signals)."""
     side = random.choice(("BUY", "SELL"))
     last = (s["open"] + s["closed"][-5:])
     last = max(last, key=lambda t: t["opened_at"], default=None)
     if last:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(last["opened_at"])).total_seconds() / 60
-        if age < 10:
+        if age < 3:
             side = "SELL" if last["side"] == "BUY" else "BUY"
     return side
 
@@ -507,11 +508,17 @@ def main():
             session_start = now.replace(hour=a // 60, minute=a % 60, second=0, microsecond=0)
             lp = s.get("last_post")
             lp = datetime.fromisoformat(lp) if lp else None
-            if lp is None or lp < session_start:
-                due = 1                                   # first signal of the session
-            else:
-                due = int(((now - lp).total_seconds() + 120) // (CADENCE_MIN * 60))   # 2 minutes of tolerance for timer jitter
-            todo = max(0, min(due, MAX_PER_RUN, PER_SESSION - have))
+            todo = 0
+            if have < PER_SESSION:
+                if lp is None or lp < session_start:
+                    todo = 1                                   # first signal of the session
+                else:
+                    wait = (lp + timedelta(minutes=CADENCE_MIN) - now).total_seconds()
+                    if wait <= MAX_WAIT_SEC:                   # next slot is due now or within a few minutes: wait for it
+                        if wait > 0:
+                            print(f"Waiting {wait:.0f}s for the next signal slot")
+                            time.sleep(wait)
+                        todo = 1
         if todo > 0:
             df = add_indicators(df)
             # Fill the quota: first the freshest setups (last 30 min, best score first), then, if we are still
