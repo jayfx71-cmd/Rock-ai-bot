@@ -117,7 +117,7 @@ def render(tr, path="scalp.png"):
     # top right
     num = f"#{tr['n']:02d}"
     f34 = font("Bold", 36)
-    tail = " / 81"
+    tail = " / 126"
     xr = 1427
     d.text((xr, 151), tail, font=f34, fill=rgba(GREY), anchor="rm")
     d.text((xr - f34.getlength(tail), 151), num, font=f34, fill=rgba(light), anchor="rm")
