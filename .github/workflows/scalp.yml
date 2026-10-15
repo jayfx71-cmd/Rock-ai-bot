@@ -2,7 +2,7 @@ name: Scalp signals
 
 on:
   schedule:
-    - cron: '15 6-21 * * 1-5'       # backup only: once an hour (the main timer is cron-job.org, see guide)
+    - cron: '*/10 6-21 * * 1-5'      # every 10 minutes, Mon-Fri
   workflow_dispatch:                # lets you press "Run workflow" by hand
 
 concurrency: scalp                  # never two runs at the same time
